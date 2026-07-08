@@ -224,6 +224,16 @@ pub struct SessionFilter {
     pub dispatch_id: Option<String>,
 }
 
+/// An editor link into a session's working directory.
+#[napi(object)]
+#[derive(Clone)]
+pub struct WorkspaceLink {
+    pub session_uid: String,
+    pub available: bool,
+    pub url: Option<String>,
+    pub detail: Option<String>,
+}
+
 #[napi(object)]
 #[derive(Clone)]
 pub struct EventOptions {
@@ -323,6 +333,7 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
+    fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink>;
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
     fn send(&self, session_uid: String, input: String) -> anyhow::Result<()>;
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session>;
@@ -491,6 +502,23 @@ impl Task for SessionsTask {
     }
 }
 
+pub struct WorkspaceLinkTask {
+    core: Arc<crate::core_impl::DisponentImpl>,
+    session_uid: String,
+}
+impl Task for WorkspaceLinkTask {
+    type Output = WorkspaceLink;
+    type JsValue = WorkspaceLink;
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.core
+            .workspace_link(self.session_uid.clone())
+            .map_err(err)
+    }
+    fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
+        Ok(o)
+    }
+}
+
 pub struct SendTask {
     core: Arc<crate::core_impl::DisponentImpl>,
     session_uid: String,
@@ -626,6 +654,14 @@ impl Disponent {
         AsyncTask::new(SessionsTask {
             core: self.core.clone(),
             filter,
+        })
+    }
+    /// Return an editor link (VS Code deep link) into the session's working directory, when the backend can honestly provide one.
+    #[napi(ts_return_type = "Promise<WorkspaceLink>")]
+    pub fn workspace_link(&self, session_uid: String) -> AsyncTask<WorkspaceLinkTask> {
+        AsyncTask::new(WorkspaceLinkTask {
+            core: self.core.clone(),
+            session_uid,
         })
     }
     #[napi]

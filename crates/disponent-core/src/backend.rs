@@ -69,6 +69,13 @@ pub trait EnvBackend: Send + Sync {
 
     /// A snapshot of the worker's terminal (poll-grade observation, scraped).
     fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String>;
+
+    /// An editor deep-link into this session's working directory, if the backend
+    /// can honestly provide one for the caller's machine. `None` = no honest link
+    /// (a remote env's files aren't on this machine, so we never fake one).
+    fn workspace_link(&self, _handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// What a backend hands the engine for a fresh worker.
@@ -135,6 +142,45 @@ impl EnvBackend for ExeDev {
     fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String> {
         ExeDev::capture(self, &handle_str(handle, "host")?)
     }
+
+    fn workspace_link(&self, handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
+        // The worker's files live on the VM, not this machine — the honest link
+        // is a VS Code Remote-SSH one that opens the dir over ssh to the VM.
+        let Some(host) = handle_str(handle, "host").ok().filter(|h| !h.is_empty()) else {
+            return Ok(None);
+        };
+        // Dry-run must never touch the network; hand back a representative link
+        // with a fabricated home so the shape is exercised end-to-end.
+        if self.dry_run {
+            return Ok(Some(remote_uri(&host, "/root/work/task")));
+        }
+        // Resolve the ABSOLUTE remote work dir with one ssh probe ($HOME isn't
+        // known in Rust). A failure surfaces as an honest error (→ available:false).
+        // The whole probe is ONE remote-command arg: `worker` lets ssh flatten
+        // argv with spaces and the login shell re-parse it, so splitting it into
+        // `sh -lc <cmd>` would make `-lc` swallow only `cd` and print $HOME.
+        let out = self
+            .worker(&host, &["cd \"$HOME/work/task\" 2>/dev/null && pwd"], None)
+            .map_err(|err| {
+                anyhow!("couldn't resolve remote working dir over ssh to {host}: {err}")
+            })?;
+        let abs = out.trim();
+        if abs.starts_with('/') {
+            Ok(Some(remote_uri(&host, abs)))
+        } else {
+            Err(anyhow!(
+                "remote working dir $HOME/work/task not found on {host}"
+            ))
+        }
+    }
+}
+
+/// The canonical clickable VS Code Remote-SSH deep link: the `vscode://` scheme
+/// routed to the remote-ssh resolver, `ssh-remote+<host>` naming the ssh target,
+/// then the absolute path (leading slash included). Mirrors the local
+/// `vscode://file<path>` protocol-handler form.
+fn remote_uri(host: &str, abs_path: &str) -> String {
+    format!("vscode://vscode-remote/ssh-remote+{host}{abs_path}")
 }
 
 #[derive(Debug, PartialEq)]

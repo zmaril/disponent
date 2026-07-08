@@ -25,7 +25,7 @@ use crate::catalog::{self, upsert};
 use crate::local::LocalTmux;
 use crate::mcp_generated::{
     DispatchSpec, DriverPlanOptions, Environment, Event, EventOptions, Offering, ReconcileReport,
-    Session, SessionFilter, Statement,
+    Session, SessionFilter, Statement, WorkspaceLink,
 };
 use crate::observe::{self, Observation};
 use crate::schema_gen::{TableSchema, DUCKDB_TABLES, PG_TABLES, SQLITE_TABLES};
@@ -752,6 +752,49 @@ impl crate::mcp_generated::DisponentMcp for Engine {
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>> {
         let ledger = self.ledger.lock().unwrap();
         Ok(ledger.sessions.iter().find(|s| s.uid == uid).cloned())
+    }
+
+    fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink> {
+        // The DTO carries the "no honest link" verdict rather than erroring, so
+        // callers get one shape whether the backend is local, remote, or absent.
+        let unavailable = |detail: String| WorkspaceLink {
+            session_uid: session_uid.clone(),
+            available: false,
+            url: None,
+            detail: Some(detail),
+        };
+        let (kind, handle) = {
+            let ledger = self.ledger.lock().unwrap();
+            let Some(session) = ledger.sessions.iter().find(|s| s.uid == session_uid) else {
+                return Ok(unavailable(format!("no such session {session_uid}")));
+            };
+            (ledger.env_kind_of(&session_uid), session.env_handle.clone())
+        };
+        let (Some(kind), Some(handle)) = (kind, handle) else {
+            return Ok(unavailable(format!(
+                "session {session_uid} has no reachable worker to open"
+            )));
+        };
+        let Some(backend) = self.backend_for(&kind) else {
+            return Ok(unavailable(format!(
+                "no live backend for environment kind '{kind}'"
+            )));
+        };
+        match backend.workspace_link(&handle) {
+            Ok(Some(url)) => Ok(WorkspaceLink {
+                session_uid,
+                available: true,
+                url: Some(url),
+                detail: None,
+            }),
+            Ok(None) => Ok(unavailable(format!(
+                "this backend ('{kind}') has no local workspace path to open"
+            ))),
+            // A backend that tried and failed to resolve a link (e.g. the VM is
+            // unreachable over ssh) surfaces its reason as honest detail rather
+            // than erroring the op — one DTO shape for every outcome.
+            Err(e) => Ok(unavailable(e.to_string())),
+        }
     }
 
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>> {

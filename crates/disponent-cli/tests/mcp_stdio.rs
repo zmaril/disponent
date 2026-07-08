@@ -19,6 +19,7 @@ impl Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_disponent"))
             .args(["mcp", "--role", role, "--sink", "none"])
             .env("DISPONENT_EXE_DRY_RUN", "1")
+            .env("DISPONENT_LOCAL_DRY_RUN", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -67,6 +68,21 @@ impl Server {
         writeln!(self.stdin, "{msg}").unwrap();
     }
 
+    /// Poll `disponent_session` until the async provisioner has attached an
+    /// env handle (dry-run backends flip to running promptly), so ops that need
+    /// a live worker (like workspace_link) have one to read.
+    fn wait_for_handle(&mut self, uid: &str) -> Value {
+        for _ in 0..100 {
+            let (session, err) = self.call("disponent_session", json!({"uid": uid}));
+            assert!(!err, "{session}");
+            if session["envHandle"].is_object() {
+                return session;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("session {uid} never got an env handle");
+    }
+
     fn tool_names(&mut self) -> Vec<String> {
         self.request("tools/list", json!({}))["tools"]
             .as_array()
@@ -89,8 +105,9 @@ fn supervisor_walks_the_whole_flow() {
     let mut server = Server::start("supervisor");
 
     let names = server.tool_names();
-    assert_eq!(names.len(), 13, "the full generated surface: {names:?}");
+    assert_eq!(names.len(), 14, "the full generated surface: {names:?}");
     assert!(names.contains(&"disponent_dispatch".to_string()));
+    assert!(names.contains(&"disponent_workspace_link".to_string()));
 
     let (envs, err) = server.call("disponent_environments", json!({}));
     assert!(!err);
@@ -135,6 +152,60 @@ fn supervisor_walks_the_whole_flow() {
     assert!(!events.as_array().unwrap().is_empty());
     assert_eq!(events[0]["kind"], "log");
 
+    // workspaceLink on a remote (exe-dev) worker: no file sits on this machine,
+    // so the honest link is a VS Code Remote-SSH one that opens the VM's work
+    // dir over ssh. (Dry-run resolves it to a fabricated /root/work/task rather
+    // than probing the network.)
+    let session = server.wait_for_handle(&uid);
+    let host = session["envHandle"]["host"].as_str().unwrap().to_string();
+    let (remote_link, err) = server.call("disponent_workspace_link", json!({"sessionUid": uid}));
+    assert!(!err, "{remote_link}");
+    assert_eq!(remote_link["available"], json!(true), "{remote_link}");
+    let remote_url = remote_link["url"].as_str().unwrap();
+    assert!(
+        remote_url.starts_with("vscode://vscode-remote/ssh-remote+"),
+        "remote-ssh deep link: {remote_url}"
+    );
+    assert!(
+        remote_url.contains(&host),
+        "link names the VM host {host}: {remote_url}"
+    );
+    assert!(
+        remote_url.ends_with("/work/task"),
+        "opens the remote work dir: {remote_url}"
+    );
+
+    // workspaceLink on a LOCAL worker: a real vscode deep link into its work dir.
+    let (local, err) = server.call(
+        "disponent_dispatch",
+        json!({"spec": {"brief": "edit me", "env": "local"}}),
+    );
+    assert!(!err, "{local}");
+    let local_uid = local["uid"].as_str().unwrap().to_string();
+    let session = server.wait_for_handle(&local_uid);
+    let work_dir = session["envHandle"]["workDir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (link, err) = server.call("disponent_workspace_link", json!({"sessionUid": local_uid}));
+    assert!(!err, "{link}");
+    assert_eq!(link["available"], json!(true), "{link}");
+    let url = link["url"].as_str().unwrap();
+    assert_eq!(url, format!("vscode://file{work_dir}/task"));
+    assert!(
+        url.starts_with("vscode://file/"),
+        "abs-path deep link: {url}"
+    );
+
+    // an unknown session is honestly unavailable, not an error
+    let (missing, err) = server.call("disponent_workspace_link", json!({"sessionUid": "nope"}));
+    assert!(!err, "{missing}");
+    assert_eq!(missing["available"], json!(false));
+    assert!(missing["detail"]
+        .as_str()
+        .unwrap()
+        .contains("no such session"));
+
     // a tool failure rides in-band: isError, not a protocol error
     let (msg, err) = server.call(
         "disponent_dispatch",
@@ -165,6 +236,7 @@ fn worker_sees_only_the_readonly_surface() {
             "disponent_offerings",
             "disponent_session",
             "disponent_sessions",
+            "disponent_workspace_link",
             "disponent_events",
             "disponent_driver_plan",
         ],

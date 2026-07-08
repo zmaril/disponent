@@ -44,6 +44,18 @@ pub struct SessionFilter {
     pub dispatch_id: Option<String>,
 }
 
+/// An editor link into a session's working directory.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceLink {
+    pub session_uid: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventOptions {
@@ -150,6 +162,7 @@ pub trait DisponentMcp {
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
+    fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink>;
     /// One page of `events` (cursor: items after `after`, at most `limit`).
     fn events(
         &self,
@@ -195,6 +208,12 @@ pub fn dispatch<T0: DisponentMcp>(
         "disponent_sessions" => {
             let filter: Option<SessionFilter> = opt_arg(args, "filter")?;
             Ok(serde_json::to_value(disponent.sessions(filter)?)?)
+        }
+        "disponent_workspace_link" => {
+            let session_uid: String = arg(args, "sessionUid")?;
+            Ok(serde_json::to_value(
+                disponent.workspace_link(session_uid)?,
+            )?)
         }
         "disponent_events" => {
             let options: Option<EventOptions> = opt_arg(args, "options")?;
@@ -431,6 +450,25 @@ pub const TOOLS_JSON: &str = r###"{
         "type": "object"
       },
       "name": "disponent_sessions"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "description": "Return an editor link (VS Code deep link) into the session's working directory, when the backend can honestly provide one.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "sessionUid": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sessionUid"
+        ],
+        "type": "object"
+      },
+      "name": "disponent_workspace_link"
     },
     {
       "annotations": {

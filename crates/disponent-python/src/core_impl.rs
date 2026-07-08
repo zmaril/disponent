@@ -117,6 +117,15 @@ fn offering_out(o: mcp::Offering) -> Offering {
     }
 }
 
+fn workspace_link_out(w: mcp::WorkspaceLink) -> WorkspaceLink {
+    WorkspaceLink {
+        session_uid: w.session_uid,
+        available: w.available,
+        url: w.url,
+        detail: w.detail,
+    }
+}
+
 // ── binding DTO → engine DTO ──
 
 fn spec_in(spec: DispatchSpec) -> anyhow::Result<mcp::DispatchSpec> {
@@ -220,6 +229,13 @@ impl DisponentCore for DisponentImpl {
             .into_iter()
             .map(session_out)
             .collect()
+    }
+
+    fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink> {
+        Ok(workspace_link_out(DisponentMcp::workspace_link(
+            self.engine.as_ref(),
+            session_uid,
+        )?))
     }
 
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>> {

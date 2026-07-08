@@ -354,6 +354,34 @@ impl SessionFilter {
     }
 }
 
+/// An editor link into a session's working directory.
+#[pyclass(get_all)]
+#[derive(Clone)]
+pub struct WorkspaceLink {
+    pub session_uid: String,
+    pub available: bool,
+    pub url: Option<String>,
+    pub detail: Option<String>,
+}
+#[pymethods]
+impl WorkspaceLink {
+    #[new]
+    #[pyo3(signature = (session_uid, available, url=None, detail=None))]
+    fn new(
+        session_uid: String,
+        available: bool,
+        url: Option<String>,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            session_uid,
+            available,
+            url,
+            detail,
+        }
+    }
+}
+
 #[pyclass(get_all)]
 #[derive(Clone)]
 pub struct EventOptions {
@@ -597,6 +625,7 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
+    fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink>;
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
     fn send(&self, session_uid: String, input: String) -> anyhow::Result<()>;
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session>;
@@ -753,6 +782,13 @@ impl Disponent {
         py.detach(move || core.sessions(Some(session_filter_arg)))
             .map_err(err)
     }
+    /// Return an editor link (VS Code deep link) into the session's working directory, when the backend can honestly provide one.
+    #[pyo3(signature = (session_uid))]
+    fn workspace_link(&self, py: Python<'_>, session_uid: String) -> PyResult<WorkspaceLink> {
+        let core = self.core.clone();
+        py.detach(move || core.workspace_link(session_uid))
+            .map_err(err)
+    }
     #[pyo3(signature = (session_uid=None, after_idx=None, kinds=None))]
     fn events(
         &self,
@@ -838,6 +874,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OpenOptions>()?;
     m.add_class::<DispatchSpec>()?;
     m.add_class::<SessionFilter>()?;
+    m.add_class::<WorkspaceLink>()?;
     m.add_class::<EventOptions>()?;
     m.add_class::<ReconcileReport>()?;
     m.add_class::<McpOptions>()?;
