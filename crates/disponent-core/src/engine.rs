@@ -778,16 +778,20 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                 "no live backend for environment kind '{kind}'"
             )));
         };
-        match backend.workspace_link(&handle)? {
-            Some(url) => Ok(WorkspaceLink {
+        match backend.workspace_link(&handle) {
+            Ok(Some(url)) => Ok(WorkspaceLink {
                 session_uid,
                 available: true,
                 url: Some(url),
                 detail: None,
             }),
-            None => Ok(unavailable(format!(
+            Ok(None) => Ok(unavailable(format!(
                 "this backend ('{kind}') has no local workspace path to open"
             ))),
+            // A backend that tried and failed to resolve a link (e.g. the VM is
+            // unreachable over ssh) surfaces its reason as honest detail rather
+            // than erroring the op — one DTO shape for every outcome.
+            Err(e) => Ok(unavailable(e.to_string())),
         }
     }
 

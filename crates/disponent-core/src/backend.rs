@@ -135,6 +135,46 @@ impl EnvBackend for ExeDev {
     fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String> {
         ExeDev::capture(self, &handle_str(handle, "host")?)
     }
+
+    fn workspace_link(&self, handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
+        // The worker's files live on the VM, not this machine — the honest link
+        // is a VS Code Remote-SSH one that opens the dir over ssh to the VM.
+        let Some(host) = handle_str(handle, "host").ok().filter(|h| !h.is_empty()) else {
+            return Ok(None);
+        };
+        // Dry-run must never touch the network; hand back a representative link
+        // with a fabricated home so the shape is exercised end-to-end.
+        if self.dry_run {
+            return Ok(Some(remote_uri(&host, "/root/work/task")));
+        }
+        // Resolve the ABSOLUTE remote work dir with one ssh probe ($HOME isn't
+        // known in Rust). A failure surfaces as an honest error (→ available:false).
+        let out = self
+            .worker(
+                &host,
+                &["sh", "-lc", "cd \"$HOME/work/task\" 2>/dev/null && pwd"],
+                None,
+            )
+            .map_err(|err| {
+                anyhow!("couldn't resolve remote working dir over ssh to {host}: {err}")
+            })?;
+        let abs = out.trim();
+        if abs.starts_with('/') {
+            Ok(Some(remote_uri(&host, abs)))
+        } else {
+            Err(anyhow!(
+                "remote working dir $HOME/work/task not found on {host}"
+            ))
+        }
+    }
+}
+
+/// The canonical clickable VS Code Remote-SSH deep link: the `vscode://` scheme
+/// routed to the remote-ssh resolver, `ssh-remote+<host>` naming the ssh target,
+/// then the absolute path (leading slash included). Mirrors the local
+/// `vscode://file<path>` protocol-handler form.
+fn remote_uri(host: &str, abs_path: &str) -> String {
+    format!("vscode://vscode-remote/ssh-remote+{host}{abs_path}")
 }
 
 #[derive(Debug, PartialEq)]

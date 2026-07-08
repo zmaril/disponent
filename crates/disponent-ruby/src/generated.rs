@@ -474,6 +474,30 @@ pub struct SessionFilter {
     pub dispatch_id: Option<String>,
 }
 
+/// An editor link into a session's working directory.
+#[magnus::wrap(class = "Disponent::WorkspaceLink", free_immediately, size)]
+#[derive(Clone)]
+pub struct WorkspaceLink {
+    pub session_uid: String,
+    pub available: bool,
+    pub url: Option<String>,
+    pub detail: Option<String>,
+}
+impl WorkspaceLink {
+    fn get_session_uid(&self) -> String {
+        self.session_uid.clone()
+    }
+    fn get_available(&self) -> bool {
+        self.available.clone()
+    }
+    fn get_url(&self) -> Option<String> {
+        self.url.clone()
+    }
+    fn get_detail(&self) -> Option<String> {
+        self.detail.clone()
+    }
+}
+
 #[derive(Clone)]
 pub struct EventOptions {
     pub session_uid: Option<String>,
@@ -678,6 +702,7 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
+    fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink>;
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
     fn send(&self, session_uid: String, input: String) -> anyhow::Result<()>;
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session>;
@@ -898,6 +923,10 @@ impl Disponent {
         }
         Ok(ary)
     }
+    /// Return an editor link (VS Code deep link) into the session's working directory, when the backend can honestly provide one.
+    fn workspace_link(&self, session_uid: String) -> Result<WorkspaceLink, Error> {
+        self.core.workspace_link(session_uid).map_err(rberr)
+    }
     fn events(&self, args: &[magnus::Value]) -> Result<Events, Error> {
         let a = magnus::scan_args::scan_args::<
             (),
@@ -959,6 +988,11 @@ impl Disponent {
 /// Register the Disponent class + every generated method (called from #[magnus::init]).
 pub fn register(ruby: &Ruby) -> Result<(), Error> {
     let class = ruby.define_class("Disponent", ruby.class_object())?;
+    let c = class.define_class("WorkspaceLink", ruby.class_object())?;
+    c.define_method("session_uid", method!(WorkspaceLink::get_session_uid, 0))?;
+    c.define_method("available", method!(WorkspaceLink::get_available, 0))?;
+    c.define_method("url", method!(WorkspaceLink::get_url, 0))?;
+    c.define_method("detail", method!(WorkspaceLink::get_detail, 0))?;
     let c = class.define_class("ReconcileReport", ruby.class_object())?;
     c.define_method("adopted", method!(ReconcileReport::get_adopted, 0))?;
     c.define_method("confirmed", method!(ReconcileReport::get_confirmed, 0))?;
@@ -1011,6 +1045,7 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("dispatch", method!(Disponent::dispatch, -1))?;
     class.define_method("session", method!(Disponent::session, 1))?;
     class.define_method("sessions", method!(Disponent::sessions, -1))?;
+    class.define_method("workspace_link", method!(Disponent::workspace_link, 1))?;
     class.define_method("events", method!(Disponent::events, -1))?;
     class.define_method("send", method!(Disponent::send, 2))?;
     class.define_method("cancel", method!(Disponent::cancel, 1))?;

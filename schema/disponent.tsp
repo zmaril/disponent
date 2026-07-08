@@ -359,7 +359,7 @@ model WorkspaceLink {
   sessionUid: SessionUid;
   /** True when an honest editor link exists for this session's backend. */
   available: boolean;
-  /** A vscode://file/… deep link into the working dir (local backends). Absent when unavailable. */
+  /** A deep link into the working dir: vscode://file/… for local backends, or vscode://vscode-remote/ssh-remote+… for remote ssh backends (exe.dev). Absent when unavailable. */
   url?: url;
   /** When available=false, an honest explanation of why (capability edge). */
   detail?: string;

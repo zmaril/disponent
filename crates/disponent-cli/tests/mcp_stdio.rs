@@ -105,7 +105,7 @@ fn supervisor_walks_the_whole_flow() {
     let mut server = Server::start("supervisor");
 
     let names = server.tool_names();
-    assert_eq!(names.len(), 13, "the full generated surface: {names:?}");
+    assert_eq!(names.len(), 14, "the full generated surface: {names:?}");
     assert!(names.contains(&"disponent_dispatch".to_string()));
     assert!(names.contains(&"disponent_workspace_link".to_string()));
 
@@ -152,16 +152,27 @@ fn supervisor_walks_the_whole_flow() {
     assert!(!events.as_array().unwrap().is_empty());
     assert_eq!(events[0]["kind"], "log");
 
-    // workspaceLink on a remote (exe-dev) worker: it has a handle, but no file
-    // sits on this machine — honest available:false, never a faked link.
-    server.wait_for_handle(&uid);
+    // workspaceLink on a remote (exe-dev) worker: no file sits on this machine,
+    // so the honest link is a VS Code Remote-SSH one that opens the VM's work
+    // dir over ssh. (Dry-run resolves it to a fabricated /root/work/task rather
+    // than probing the network.)
+    let session = server.wait_for_handle(&uid);
+    let host = session["envHandle"]["host"].as_str().unwrap().to_string();
     let (remote_link, err) = server.call("disponent_workspace_link", json!({"sessionUid": uid}));
     assert!(!err, "{remote_link}");
-    assert_eq!(remote_link["available"], json!(false));
-    assert!(remote_link["url"].is_null());
+    assert_eq!(remote_link["available"], json!(true), "{remote_link}");
+    let remote_url = remote_link["url"].as_str().unwrap();
     assert!(
-        remote_link["detail"].as_str().unwrap().contains("exe_dev"),
-        "honest capability edge names the backend: {remote_link}"
+        remote_url.starts_with("vscode://vscode-remote/ssh-remote+"),
+        "remote-ssh deep link: {remote_url}"
+    );
+    assert!(
+        remote_url.contains(&host),
+        "link names the VM host {host}: {remote_url}"
+    );
+    assert!(
+        remote_url.ends_with("/work/task"),
+        "opens the remote work dir: {remote_url}"
     );
 
     // workspaceLink on a LOCAL worker: a real vscode deep link into its work dir.

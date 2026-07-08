@@ -1580,7 +1580,7 @@
             "base": "string"
           },
           "nullable": true,
-          "doc": "A vscode://file/… deep link into the working dir (local backends). Absent when unavailable."
+          "doc": "A deep link into the working dir: vscode://file/… for local backends, or vscode://vscode-remote/ssh-remote+… for remote ssh backends (exe.dev). Absent when unavailable."
         },
         {
           "name": "detail",
