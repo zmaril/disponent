@@ -26,6 +26,16 @@ fn err(e: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(e.to_string())
 }
 
+/// Set an environment variable IN THE NATIVE PROCESS. Exists because Bun's
+/// `process.env` assignments update only the JS-side snapshot — a Rust engine
+/// reading `std::env::var` never sees them — so backend knobs
+/// (`DISPONENT_EXE_DRY_RUN`, `DISPONENT_CLAUDE_FLAGS`, …) set from JS must
+/// cross through here BEFORE constructing `Disponent`.
+#[napi]
+pub fn set_env(key: String, value: String) {
+    std::env::set_var(key, value);
+}
+
 /// Sanity probe — confirms the native addon loaded and links disponent-core.
 #[napi]
 pub fn version() -> String {
