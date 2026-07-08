@@ -389,6 +389,12 @@ interface Disponent {
   @readonly environments(): Environment[];
   refresh(envSlug?: string): Environment[];
 
+  /** The offerings table: every env × agent × model the catalog knows, each
+   * flagged `isDefault` when it's the pick for a dispatch that names only the
+   * environment. Lets a consumer enumerate what can run where without reaching
+   * for the raw driver plan. */
+  @readonly offerings(): Offering[];
+
   dispatch(spec: DispatchSpec): Session;
   @readonly session(uid: SessionUid): Session | null;
   @readonly sessions(filter?: SessionFilter): Session[];

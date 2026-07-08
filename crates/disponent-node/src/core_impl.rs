@@ -103,6 +103,15 @@ fn environment_out(e: mcp::Environment) -> anyhow::Result<Environment> {
     })
 }
 
+fn offering_out(o: mcp::Offering) -> Offering {
+    Offering {
+        env_slug: o.env_slug,
+        agent_name: o.agent_name,
+        model_id: o.model_id,
+        is_default: o.is_default,
+    }
+}
+
 // ── napi DTO → engine DTO ──
 
 fn spec_in(spec: DispatchSpec) -> anyhow::Result<mcp::DispatchSpec> {
@@ -171,6 +180,15 @@ impl DisponentCore for DisponentImpl {
             .into_iter()
             .map(environment_out)
             .collect()
+    }
+
+    fn offerings(&self) -> anyhow::Result<Vec<Offering>> {
+        Ok(self
+            .engine
+            .offerings()?
+            .into_iter()
+            .map(offering_out)
+            .collect())
     }
 
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>> {

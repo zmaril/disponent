@@ -89,7 +89,7 @@ fn supervisor_walks_the_whole_flow() {
     let mut server = Server::start("supervisor");
 
     let names = server.tool_names();
-    assert_eq!(names.len(), 12, "the full generated surface: {names:?}");
+    assert_eq!(names.len(), 13, "the full generated surface: {names:?}");
     assert!(names.contains(&"disponent_dispatch".to_string()));
 
     let (envs, err) = server.call("disponent_environments", json!({}));
@@ -101,6 +101,22 @@ fn supervisor_walks_the_whole_flow() {
         .map(|e| e["slug"].as_str().unwrap())
         .collect();
     assert_eq!(slugs, ["local", "exe-dev"], "the shipped catalog");
+
+    // the offerings table: env × agent × model, one row flagged default per env
+    let (offerings, err) = server.call("disponent_offerings", json!({}));
+    assert!(!err);
+    let rows = offerings.as_array().unwrap();
+    assert!(rows.iter().any(|o| o["envSlug"] == "local"
+        && o["agentName"] == "claude-code"
+        && o["modelId"] == "claude-opus-4-8"
+        && o["isDefault"] == json!(true)));
+    assert_eq!(
+        rows.iter()
+            .filter(|o| o["isDefault"] == json!(true))
+            .count(),
+        2,
+        "one default per environment (local, exe-dev)"
+    );
 
     let (session, err) = server.call(
         "disponent_dispatch",
@@ -146,6 +162,7 @@ fn worker_sees_only_the_readonly_surface() {
         names,
         [
             "disponent_environments",
+            "disponent_offerings",
             "disponent_session",
             "disponent_sessions",
             "disponent_events",

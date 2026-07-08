@@ -28,6 +28,16 @@ test("the whole lifecycle from JS", async () => {
   expect(envs.map((e: any) => e.slug)).toEqual(["local", "exe-dev"]);
   expect(envs[0].kind).toBe(EnvKind.Local);
 
+  // the offerings table: env × agent × model, is_default flags the pick
+  const offerings = await d.offerings();
+  expect(
+    offerings.map((o: any) => [o.envSlug, o.agentName, o.modelId, o.isDefault]),
+  ).toContainEqual(["local", "claude-code", "claude-opus-4-8", true]);
+  expect(offerings.filter((o: any) => o.isDefault).map((o: any) => o.envSlug)).toEqual([
+    "local",
+    "exe-dev",
+  ]);
+
   const session = await d.dispatch({
     brief: "say hi from node",
     env: "local",
