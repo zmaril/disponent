@@ -30,9 +30,7 @@ use crate::mcp_generated::{
 use crate::observe::{self, Observation};
 use crate::schema_gen::{TableSchema, DUCKDB_TABLES, PG_TABLES, SQLITE_TABLES};
 use crate::sink::Sink;
-
-/// Session states with no way forward — reap archives them, nothing revives them.
-const TERMINAL: &[&str] = &["completed", "failed", "cancelled", "lost"];
+use crate::status::{legal_transition, TERMINAL};
 
 /// Page size for the stream cursors when the caller doesn't pass `limit`.
 const DEFAULT_PAGE: usize = 100;
@@ -489,6 +487,9 @@ impl Ledger {
 
     fn transition(&mut self, uid: &str, to: &str) -> anyhow::Result<(Session, Event)> {
         let from = self.session_mut(uid)?.state.clone();
+        if !legal_transition(&from, to) {
+            bail!("illegal transition: {from} -> {to}");
+        }
         let session = self.session_mut(uid)?;
         session.state = to.to_string();
         if TERMINAL.contains(&to) {
@@ -561,16 +562,20 @@ fn provision_worker(
                 let _ = backend.teardown(&p.handle);
                 return;
             }
-            session.state = "running".to_string();
+            // Route the flip through the guard so it can't skip the state
+            // machine and so exactly one "state" event is emitted.
+            let state_ev = match l.transition(&uid, "running") {
+                Ok((_, e)) => e,
+                Err(_) => {
+                    let _ = backend.teardown(&p.handle);
+                    return;
+                }
+            };
+            let session = l.session_mut(&uid).expect("just transitioned to running");
             session.started_at = Some(now());
             session.env_handle = Some(p.handle.clone());
             session.url = p.url.clone();
             let snapshot = session.clone();
-            let state_ev = l.push_event(
-                &uid,
-                "state",
-                json!({"kind": "state", "payload": {"from": "provisioning", "to": "running"}}),
-            );
             let log_ev = l.push_event(
                 &uid,
                 "log",
@@ -1232,6 +1237,39 @@ mod tests {
         let reaped = engine.reap(s.uid).unwrap();
         assert_eq!(reaped.state, "cancelled");
         assert!(reaped.reaped_at.is_some());
+    }
+
+    #[test]
+    fn the_ledger_guards_the_state_machine() {
+        let engine = Engine::new();
+        // exe-dev has no backend here, so the session parks at queued and we can
+        // drive the ledger through transitions by hand without racing provisioning.
+        let uid = engine.dispatch(spec("exe-dev")).unwrap().uid;
+        let uid2 = engine.dispatch(spec("exe-dev")).unwrap().uid;
+        let mut ledger = engine.ledger.lock().unwrap();
+
+        // A legal walk all the way to a terminal state succeeds.
+        ledger.transition(&uid, "provisioning").unwrap();
+        ledger.transition(&uid, "running").unwrap();
+        ledger.transition(&uid, "needs_input").unwrap();
+        ledger.transition(&uid, "running").unwrap();
+        let (done, _) = ledger.transition(&uid, "completed").unwrap();
+        assert_eq!(done.state, "completed");
+        assert!(done.ended_at.is_some());
+
+        // A terminal state has no way forward — reviving it is rejected.
+        let err = ledger.transition(&uid, "running").unwrap_err();
+        assert!(
+            err.to_string().contains("illegal transition"),
+            "expected an illegal-transition error, got: {err}"
+        );
+
+        // And a fresh session can't skip states (queued straight to running).
+        assert!(ledger.transition(&uid2, "running").is_err());
+        // queued -> cancelled is a legal live-state exit, though.
+        let (cancelled, _) = ledger.transition(&uid2, "cancelled").unwrap();
+        assert_eq!(cancelled.state, "cancelled");
+        assert!(ledger.transition(&uid2, "running").is_err());
     }
 
     #[test]

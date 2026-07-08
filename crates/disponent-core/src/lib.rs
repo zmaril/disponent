@@ -15,5 +15,6 @@ pub mod observe;
 pub mod otel;
 pub mod schema_gen;
 pub mod sink;
+pub mod status;
 
 pub use engine::Engine;
