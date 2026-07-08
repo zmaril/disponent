@@ -724,6 +724,8 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             session_uid: session.uid.clone(),
             template: dispatch.spec.template.clone(),
             repo: dispatch.spec.repo.clone(),
+            isolation: dispatch.spec.isolation.clone(),
+            git_ref: dispatch.spec.git_ref.clone(),
             setup: dispatch.spec.setup.clone(),
             brief: dispatch.spec.brief.clone(),
             otel_endpoint: self.otel_endpoint_for(&env_kind),

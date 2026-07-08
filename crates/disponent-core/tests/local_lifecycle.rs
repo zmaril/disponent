@@ -35,6 +35,34 @@ fn spec(brief: &str) -> DispatchSpec {
     serde_json::from_value(serde_json::json!({"brief": brief, "env": "local"})).unwrap()
 }
 
+fn have_git() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
+/// A throwaway git repo with one commit, so `git worktree add -b …` has a HEAD.
+fn seed_repo(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t.test"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(dir.join("README.md"), "hi\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "seed"]);
+}
+
 fn wait_for(engine: &Engine, uid: &str, state: &str) -> Session {
     common::wait_for(engine, uid, state, Duration::from_secs(10))
 }
@@ -92,6 +120,78 @@ fn local_lifecycle_on_real_tmux() {
     // reap removes the dir too
     engine.reap(session.uid.clone()).unwrap();
     assert!(!work.exists(), "work dir removed by reap");
+}
+
+#[test]
+fn worktree_isolation_adds_and_removes_a_worktree() {
+    if !have_tmux() || !have_git() {
+        eprintln!("tmux/git not installed; skipping");
+        return;
+    }
+    let (socket, root) = sandbox("wt");
+    // A local source repo to add worktrees off of.
+    let src = std::env::temp_dir().join(format!("disponent-wt-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&src);
+    seed_repo(&src);
+
+    let engine = Engine::with_backend(LocalTmux::sandboxed(&socket, root.clone(), FAKE_AGENT));
+    let spec: DispatchSpec = serde_json::from_value(serde_json::json!({
+        "brief": "worktree me",
+        "env": "local",
+        "repo": src.display().to_string(),
+        "isolation": "worktree",
+        "gitRef": "feature/x",
+    }))
+    .unwrap();
+
+    let session = engine.dispatch(spec).unwrap();
+    let running = wait_for(&engine, &session.uid, "running");
+    let handle = running.env_handle.clone().unwrap();
+    // The handle records the parent repo so reap can deregister the worktree.
+    assert_eq!(
+        handle["worktreeRepo"],
+        src.canonicalize().unwrap().display().to_string()
+    );
+
+    // The task dir is a git worktree, not a clone: `.git` is a file (a gitdir
+    // pointer), and the parent repo lists it + the requested branch.
+    let work = root.join(&session.uid);
+    let task = work.join("task");
+    assert!(
+        task.join(".git").is_file(),
+        "worktree .git is a pointer file"
+    );
+    let worktree_list = || {
+        let out = std::process::Command::new("git")
+            .args(["-C", &src.display().to_string(), "worktree", "list"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let list = worktree_list();
+    assert!(
+        list.contains(&task.display().to_string()),
+        "parent lists the worktree:\n{list}"
+    );
+    assert!(
+        list.contains("feature/x"),
+        "worktree checked out the requested ref:\n{list}"
+    );
+
+    // Cancel keeps everything (same as the clone case).
+    engine.cancel(session.uid.clone()).unwrap();
+    assert!(task.join(".git").is_file(), "worktree kept after cancel");
+
+    // Reap deregisters the worktree in the parent AND removes the dir.
+    engine.reap(session.uid.clone()).unwrap();
+    assert!(!work.exists(), "work dir removed by reap");
+    let list = worktree_list();
+    assert!(
+        !list.contains(&task.display().to_string()),
+        "worktree deregistered from parent (no dangling registration):\n{list}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&src);
 }
 
 #[test]
