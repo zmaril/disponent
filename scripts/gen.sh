@@ -39,4 +39,5 @@ cargo run -q --manifest-path "$FLUESSIG_DIR/Cargo.toml" --bin fluessig-gen -- \
   --docs "$REPO/schema/schema_docs.json" \
   --api "$REPO/schema/api.json" \
   --mcp "$REPO/crates/disponent-core/src/mcp_generated.rs" \
+  --node "$REPO/crates/disponent-node/src/generated.rs" \
   --banner-note 'straitjacket-allow-file:duplication — generated code repeats by design.'

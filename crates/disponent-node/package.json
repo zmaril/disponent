@@ -1,0 +1,24 @@
+{
+  "name": "@disponent/node",
+  "version": "0.0.0",
+  "description": "Dispatch work to coding agents — the disponent engine as an in-process Node/Bun native addon.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "disponent"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "gen": "bash ../../scripts/gen.sh",
+    "test": "DISPONENT_EXE_DRY_RUN=1 DISPONENT_LOCAL_DRY_RUN=1 bun test"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.4.2"
+  }
+}

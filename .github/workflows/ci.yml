@@ -56,3 +56,19 @@ jobs:
             git diff | head -200
             exit 1
           fi
+
+  node:
+    name: node binding
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - name: build the napi addon + test
+        working-directory: crates/disponent-node
+        run: |
+          bun install
+          bun run build
+          bun run test

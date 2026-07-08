@@ -7,12 +7,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Node binding (`@disponent/node`, napi-rs): the engine in-process in
+  Node/Bun. The napi surface is generated from the catalog (classes,
+  Promises, poll-streams for events/driverPlan); `wait()` is the hand-written
+  `@manual` op. `cd crates/disponent-node && bun install && bun run build`.
 - Local tmux backend: dispatch to `env: local` runs the agent on this machine
   in a `tmux -L disponent` session over a managed work dir, with the same
   clone → setup → agent order, cancel/reap split, and reconcile adoption as
   the remote backend.
 - `EnvBackend` trait: the engine routes dispatches by environment kind and
   treats worker handles as opaque, per-backend JSON.
+- Ledger rehydrate: opening over a SQLite sink restores dispatches, sessions,
+  and events — restarts serve the full board, and running sessions get their
+  observers back.
+- Worker observation, two tiers. Scraped: every running session's terminal is
+  polled (`capture-pane` on both backends) through a fluessig ObserverPool and
+  its deltas land as `raw` events. Exact: an OTLP/http-json receiver
+  (`DISPONENT_OTEL_PORT`, or `Engine::start_otel`) ingests Claude Code's own
+  telemetry — prompts and responses as `message`, tool results as
+  `toolResult`, api requests as `usage` with real token counts and cost —
+  with workers wired automatically via `OTEL_*` env in their runners and
+  every record stamped `disponent.session_uid`.
 
 ## [0.1.0] - 2026-07-08
 

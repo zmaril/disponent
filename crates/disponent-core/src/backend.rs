@@ -24,6 +24,9 @@ pub struct ProvisionRequest {
     /// Per-dispatch setup, run after the template's baseline and the clone.
     pub setup: Option<String>,
     pub brief: String,
+    /// OTLP endpoint the worker's agent exports telemetry to (the exact
+    /// observation tier); None = don't wire telemetry.
+    pub otel_endpoint: Option<String>,
 }
 
 pub struct Provisioned {
@@ -56,6 +59,9 @@ pub trait EnvBackend: Send + Sync {
     /// The sessions discoverable in the environment right now, as
     /// (session_uid, handle) — what reconcile confirms/adopts against.
     fn survey(&self) -> anyhow::Result<Vec<(String, serde_json::Value)>>;
+
+    /// A snapshot of the worker's terminal (poll-grade observation, scraped).
+    fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String>;
 }
 
 /// What a backend hands the engine for a fresh worker.
@@ -117,6 +123,10 @@ impl EnvBackend for ExeDev {
                 })
             })
             .collect())
+    }
+
+    fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String> {
+        ExeDev::capture(self, &handle_str(handle, "host")?)
     }
 }
 
@@ -384,10 +394,16 @@ pub fn shq(s: &str) -> String {
 /// break out of its assignment; the brief is `cat`-ed at run time so it never
 /// rides a tmux command string.
 pub fn bootstrap_script(backend: &ExeDev, req: &ProvisionRequest) -> String {
+    let otel_block = req
+        .otel_endpoint
+        .as_deref()
+        .map(|e| crate::otel::worker_env(e, &req.session_uid))
+        .unwrap_or_default();
     let header = [
         format!("REPO_SLUG={}", shq(req.repo.as_deref().unwrap_or(""))),
         format!("CLAUDE_FLAGS={}", shq(&backend.claude_flags)),
         format!("TTYD_PORT={}", shq(&backend.ttyd_port.to_string())),
+        format!("OTEL_BLOCK={}", shq(&otel_block)),
     ]
     .join("\n");
     // The dispatch setup runs verbatim as its own block (it's the operator's
@@ -410,6 +426,7 @@ cd "$work"
   echo '#!/usr/bin/env bash'
   echo 'export PATH="$HOME/.bun/bin:$PATH"'
   echo 'cd "$1"'
+  echo "$OTEL_BLOCK"
   echo "claude $CLAUDE_FLAGS \"\$(cat /tmp/disponent-brief.md)\" || true"
   echo 'exec bash'
 } > "$HOME/disponent-run.sh"
@@ -468,6 +485,7 @@ mod tests {
             repo: repo.map(String::from),
             setup: setup.map(String::from),
             brief: "do the thing".into(),
+            otel_endpoint: None,
         }
     }
 
