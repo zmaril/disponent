@@ -149,12 +149,11 @@ impl EnvBackend for ExeDev {
         }
         // Resolve the ABSOLUTE remote work dir with one ssh probe ($HOME isn't
         // known in Rust). A failure surfaces as an honest error (→ available:false).
+        // The whole probe is ONE remote-command arg: `worker` lets ssh flatten
+        // argv with spaces and the login shell re-parse it, so splitting it into
+        // `sh -lc <cmd>` would make `-lc` swallow only `cd` and print $HOME.
         let out = self
-            .worker(
-                &host,
-                &["sh", "-lc", "cd \"$HOME/work/task\" 2>/dev/null && pwd"],
-                None,
-            )
+            .worker(&host, &["cd \"$HOME/work/task\" 2>/dev/null && pwd"], None)
             .map_err(|err| {
                 anyhow!("couldn't resolve remote working dir over ssh to {host}: {err}")
             })?;
