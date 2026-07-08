@@ -1,0 +1,19 @@
+[package]
+name = "disponent-core"
+description = "Dispatch work to coding agents — the engine: ledger, catalog, and the generated MCP surface."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+# The schema tool doubles as the runtime data plane: SqlCodec compiles typed
+# mutations into ordered {sql, params} plans (the sink + driverPlan). Pinned by
+# SHA, same discipline as the codegen pin in scripts/gen.sh — bump deliberately.
+fluessig = { git = "https://github.com/zmaril/fluessig", rev = "15a2e1deaf122ebfdb6b6d392f59c111729397c1" }
+rusqlite = { version = "0.32", features = ["bundled"] }

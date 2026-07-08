@@ -1,0 +1,1707 @@
+{
+  "fluessig": {
+    "format": 1,
+    "emitter": "0.0.0",
+    "compiler": "1.13.0"
+  },
+  "source": "disponent.tsp",
+  "scalars": [
+    {
+      "name": "DispatchId",
+      "base": "string"
+    },
+    {
+      "name": "SessionUid",
+      "base": "string"
+    },
+    {
+      "name": "Cents",
+      "base": "int64"
+    }
+  ],
+  "unions": [
+    {
+      "name": "EventPayload",
+      "doc": "One observation's body — the union's variant tag is the wire discriminator.",
+      "variants": [
+        {
+          "tag": "state",
+          "type": {
+            "k": "ref",
+            "name": "StateChange",
+            "entity": false
+          }
+        },
+        {
+          "tag": "message",
+          "type": {
+            "k": "ref",
+            "name": "AgentMessage",
+            "entity": false
+          }
+        },
+        {
+          "tag": "toolCall",
+          "type": {
+            "k": "ref",
+            "name": "ToolCallInfo",
+            "entity": false
+          }
+        },
+        {
+          "tag": "toolResult",
+          "type": {
+            "k": "ref",
+            "name": "ToolResultInfo",
+            "entity": false
+          }
+        },
+        {
+          "tag": "log",
+          "type": {
+            "k": "ref",
+            "name": "LogLine",
+            "entity": false
+          }
+        },
+        {
+          "tag": "usage",
+          "type": {
+            "k": "ref",
+            "name": "UsageDelta",
+            "entity": false
+          }
+        },
+        {
+          "tag": "artifact",
+          "type": {
+            "k": "ref",
+            "name": "ArtifactRef",
+            "entity": false
+          }
+        },
+        {
+          "tag": "raw",
+          "type": {
+            "k": "ref",
+            "name": "RawObservation",
+            "entity": false
+          }
+        }
+      ]
+    }
+  ],
+  "enums": [
+    {
+      "name": "EnvKind",
+      "variants": [
+        {
+          "name": "local"
+        },
+        {
+          "name": "exe_dev"
+        },
+        {
+          "name": "claude_code_web"
+        },
+        {
+          "name": "custom"
+        }
+      ]
+    },
+    {
+      "name": "SessionState",
+      "variants": [
+        {
+          "name": "queued"
+        },
+        {
+          "name": "provisioning"
+        },
+        {
+          "name": "running"
+        },
+        {
+          "name": "needs_input"
+        },
+        {
+          "name": "completed"
+        },
+        {
+          "name": "failed"
+        },
+        {
+          "name": "cancelled"
+        },
+        {
+          "name": "lost"
+        }
+      ]
+    },
+    {
+      "name": "ExitReason",
+      "variants": [
+        {
+          "name": "ok"
+        },
+        {
+          "name": "error"
+        },
+        {
+          "name": "signal"
+        },
+        {
+          "name": "timeout"
+        },
+        {
+          "name": "budget"
+        },
+        {
+          "name": "setup"
+        },
+        {
+          "name": "unknown"
+        }
+      ]
+    },
+    {
+      "name": "IsolationKind",
+      "variants": [
+        {
+          "name": "none"
+        },
+        {
+          "name": "worktree"
+        },
+        {
+          "name": "container"
+        },
+        {
+          "name": "vm"
+        }
+      ]
+    },
+    {
+      "name": "TemplateKind",
+      "variants": [
+        {
+          "name": "vm_image"
+        },
+        {
+          "name": "container_image"
+        }
+      ]
+    },
+    {
+      "name": "CapabilityKind",
+      "variants": [
+        {
+          "name": "dispatch"
+        },
+        {
+          "name": "interact"
+        },
+        {
+          "name": "observe_stream"
+        },
+        {
+          "name": "observe_poll"
+        },
+        {
+          "name": "list_sessions"
+        },
+        {
+          "name": "resume"
+        },
+        {
+          "name": "cancel"
+        },
+        {
+          "name": "teardown"
+        },
+        {
+          "name": "isolation_worktree"
+        },
+        {
+          "name": "isolation_container"
+        },
+        {
+          "name": "isolation_vm"
+        },
+        {
+          "name": "templates"
+        },
+        {
+          "name": "artifact_fetch"
+        },
+        {
+          "name": "usage_report"
+        }
+      ]
+    },
+    {
+      "name": "EventKind",
+      "variants": [
+        {
+          "name": "state"
+        },
+        {
+          "name": "message"
+        },
+        {
+          "name": "tool_call"
+        },
+        {
+          "name": "tool_result"
+        },
+        {
+          "name": "log"
+        },
+        {
+          "name": "usage"
+        },
+        {
+          "name": "artifact"
+        },
+        {
+          "name": "raw"
+        }
+      ]
+    },
+    {
+      "name": "Fidelity",
+      "variants": [
+        {
+          "name": "exact"
+        },
+        {
+          "name": "derived"
+        },
+        {
+          "name": "scraped"
+        }
+      ]
+    },
+    {
+      "name": "ArtifactKind",
+      "variants": [
+        {
+          "name": "branch"
+        },
+        {
+          "name": "pull_request"
+        },
+        {
+          "name": "patch"
+        },
+        {
+          "name": "file"
+        },
+        {
+          "name": "report"
+        },
+        {
+          "name": "url"
+        }
+      ]
+    },
+    {
+      "name": "McpRole",
+      "variants": [
+        {
+          "name": "supervisor"
+        },
+        {
+          "name": "worker"
+        }
+      ]
+    }
+  ],
+  "entities": [
+    {
+      "name": "Environment",
+      "table": "environments",
+      "key": [
+        "slug"
+      ],
+      "doc": "Somewhere work can run. Config supplies these; the shipped catalog fills offerings + capabilities.",
+      "fields": [
+        {
+          "name": "slug",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "kind",
+          "type": {
+            "k": "enum",
+            "name": "EnvKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "displayName",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "endpoint",
+          "type": {
+            "k": "scalar",
+            "name": "url",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "Address only — never a credential (secrets live in config/templates)."
+        },
+        {
+          "name": "capabilities",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "ref",
+              "name": "Capability",
+              "entity": true
+            }
+          },
+          "nullable": false,
+          "doc": "What this env can do (closed vocabulary; open detail).",
+          "relation": {
+            "to": "Capability",
+            "cardinality": "many",
+            "kind": "association",
+            "properties": "CapabilityDetail",
+            "table": "env_capabilities",
+            "fkColumns": null,
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "lastProbedAt",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Capability",
+      "table": "capabilities",
+      "key": [
+        "capability"
+      ],
+      "doc": "One capability row (the edge target of Environment.capabilities).",
+      "fields": [
+        {
+          "name": "capability",
+          "type": {
+            "k": "enum",
+            "name": "CapabilityKind"
+          },
+          "nullable": false,
+          "key": true
+        }
+      ]
+    },
+    {
+      "name": "Template",
+      "table": "templates",
+      "key": [
+        "name"
+      ],
+      "doc": "A reusable starting state, curated out-of-band (auth baked in by hand).\nReference-only: disponent copies/runs what you name, never builds.",
+      "fields": [
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "kind",
+          "type": {
+            "k": "enum",
+            "name": "TemplateKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "locator",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "exe.dev template VM name, container image ref, …"
+        },
+        {
+          "name": "setup",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Baseline setup script — runs first, before the repo clone and the dispatch's setup."
+        },
+        {
+          "name": "note",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Agent",
+      "table": "agents",
+      "key": [
+        "name"
+      ],
+      "doc": "A coding agent program (claude-code, codex, …).",
+      "fields": [
+        {
+          "name": "name",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "version",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "AgentModel",
+      "table": "models",
+      "key": [
+        "id"
+      ],
+      "doc": "A model an agent can run with.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "provider",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "family",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Offering",
+      "table": "offerings",
+      "key": [
+        "env",
+        "agent",
+        "model"
+      ],
+      "doc": "env × agent × model availability (from the shipped catalog + config).",
+      "fields": [
+        {
+          "name": "env",
+          "type": {
+            "k": "ref",
+            "name": "Environment",
+            "entity": true
+          },
+          "nullable": false,
+          "key": true,
+          "relation": {
+            "to": "Environment",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "env_slug"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "agent",
+          "type": {
+            "k": "ref",
+            "name": "Agent",
+            "entity": true
+          },
+          "nullable": false,
+          "key": true,
+          "relation": {
+            "to": "Agent",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "agent_name"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "model",
+          "type": {
+            "k": "ref",
+            "name": "AgentModel",
+            "entity": true
+          },
+          "nullable": false,
+          "key": true,
+          "relation": {
+            "to": "AgentModel",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "model_id"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "isDefault",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "Dispatch",
+      "table": "dispatches",
+      "key": [
+        "id"
+      ],
+      "doc": "The immutable request. Never mutated after dispatch(); lifecycle lives on sessions.",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "DispatchId",
+            "base": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "createdAt",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "brief",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The brief — the whole task spec, free-form. Structure belongs to consumers."
+        },
+        {
+          "name": "repo",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Workspace: URL or local path; empty = no repo (pure-prompt work)."
+        },
+        {
+          "name": "gitRef",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "isolation",
+          "type": {
+            "k": "enum",
+            "name": "IsolationKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "template",
+          "type": {
+            "k": "ref",
+            "name": "Template",
+            "entity": true
+          },
+          "nullable": true,
+          "relation": {
+            "to": "Template",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "template_name"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "setup",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Per-dispatch setup script — runs after the template's setup and the repo clone."
+        },
+        {
+          "name": "env",
+          "type": {
+            "k": "ref",
+            "name": "Environment",
+            "entity": true
+          },
+          "nullable": false,
+          "relation": {
+            "to": "Environment",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "env_slug"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "agent",
+          "type": {
+            "k": "ref",
+            "name": "Agent",
+            "entity": true
+          },
+          "nullable": false,
+          "relation": {
+            "to": "Agent",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "agent_name"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "model",
+          "type": {
+            "k": "ref",
+            "name": "AgentModel",
+            "entity": true
+          },
+          "nullable": true,
+          "relation": {
+            "to": "AgentModel",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "model_id"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "timeoutSecs",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": true
+        },
+        {
+          "name": "maxBudget",
+          "type": {
+            "k": "scalar",
+            "name": "Cents",
+            "base": "numeric"
+          },
+          "nullable": true
+        },
+        {
+          "name": "viaMcpDepth",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "doc": "MCP recursion depth: 0 = dispatched by the host program."
+        },
+        {
+          "name": "labels",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "Consumer labels, opaque to disponent."
+        }
+      ]
+    },
+    {
+      "name": "Session",
+      "table": "sessions",
+      "key": [
+        "uid"
+      ],
+      "doc": "One attempt at a dispatch, mirroring one env-side resource.",
+      "fields": [
+        {
+          "name": "uid",
+          "type": {
+            "k": "scalar",
+            "name": "SessionUid",
+            "base": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "dispatch",
+          "type": {
+            "k": "ref",
+            "name": "Dispatch",
+            "entity": true
+          },
+          "nullable": false,
+          "relation": {
+            "to": "Dispatch",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "dispatch_id"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "state",
+          "type": {
+            "k": "enum",
+            "name": "SessionState"
+          },
+          "nullable": false
+        },
+        {
+          "name": "envHandle",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "The env's own handle(s): tmux session name, VM name, web session id/url."
+        },
+        {
+          "name": "url",
+          "type": {
+            "k": "scalar",
+            "name": "url",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "Human-facing view URL when the env has one (ttyd, web session page)."
+        },
+        {
+          "name": "resumedFrom",
+          "type": {
+            "k": "ref",
+            "name": "Session",
+            "entity": true
+          },
+          "nullable": true,
+          "relation": {
+            "to": "Session",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "resumed_from"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "startedAt",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": true
+        },
+        {
+          "name": "endedAt",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": true
+        },
+        {
+          "name": "exitReason",
+          "type": {
+            "k": "enum",
+            "name": "ExitReason"
+          },
+          "nullable": true
+        },
+        {
+          "name": "exitDetail",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "reapedAt",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": true,
+          "doc": "Set by reap(): resources torn down, row archived. Null = still on the board."
+        }
+      ]
+    },
+    {
+      "name": "Event",
+      "table": "events",
+      "key": [
+        "session",
+        "idx"
+      ],
+      "doc": "One observation on a session's timeline (containment rides the key: the\nsession FK + the position, like Artifact/Usage — to-manys are queries).",
+      "fields": [
+        {
+          "name": "session",
+          "type": {
+            "k": "ref",
+            "name": "Session",
+            "entity": true
+          },
+          "nullable": false,
+          "key": true,
+          "relation": {
+            "to": "Session",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "session_uid"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "idx",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "ts",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": false
+        },
+        {
+          "name": "kind",
+          "type": {
+            "k": "enum",
+            "name": "EventKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "fidelity",
+          "type": {
+            "k": "enum",
+            "name": "Fidelity"
+          },
+          "nullable": false
+        },
+        {
+          "name": "payload",
+          "type": {
+            "k": "union",
+            "name": "EventPayload"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "Artifact",
+      "table": "artifacts",
+      "key": [
+        "session",
+        "idx"
+      ],
+      "doc": "Something the session produced.",
+      "fields": [
+        {
+          "name": "session",
+          "type": {
+            "k": "ref",
+            "name": "Session",
+            "entity": true
+          },
+          "nullable": false,
+          "key": true,
+          "relation": {
+            "to": "Session",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "session_uid"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "idx",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "kind",
+          "type": {
+            "k": "enum",
+            "name": "ArtifactKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "locator",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "Branch name, PR URL, path, … — a pointer, not the bytes."
+        },
+        {
+          "name": "meta",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Usage",
+      "table": "usage",
+      "key": [
+        "session",
+        "model"
+      ],
+      "doc": "Best-effort accounting, per session per model.",
+      "fields": [
+        {
+          "name": "session",
+          "type": {
+            "k": "ref",
+            "name": "Session",
+            "entity": true
+          },
+          "nullable": false,
+          "key": true,
+          "relation": {
+            "to": "Session",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "session_uid"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "model",
+          "type": {
+            "k": "ref",
+            "name": "AgentModel",
+            "entity": true
+          },
+          "nullable": false,
+          "key": true,
+          "relation": {
+            "to": "AgentModel",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "model_id"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "inputTokens",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false
+        },
+        {
+          "name": "outputTokens",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false
+        },
+        {
+          "name": "costCents",
+          "type": {
+            "k": "scalar",
+            "name": "Cents",
+            "base": "numeric"
+          },
+          "nullable": false
+        }
+      ]
+    }
+  ],
+  "relationProperties": [
+    {
+      "name": "CapabilityDetail",
+      "fields": [
+        {
+          "name": "detail",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "Env-specific texture: poll granularity, supported template kinds, …"
+        }
+      ]
+    }
+  ],
+  "valueStructs": [
+    {
+      "name": "StateChange",
+      "fields": [
+        {
+          "name": "from",
+          "type": {
+            "k": "enum",
+            "name": "SessionState"
+          },
+          "nullable": false
+        },
+        {
+          "name": "to",
+          "type": {
+            "k": "enum",
+            "name": "SessionState"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "AgentMessage",
+      "fields": [
+        {
+          "name": "role",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "text",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "ToolCallInfo",
+      "fields": [
+        {
+          "name": "tool",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "input",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "ToolResultInfo",
+      "fields": [
+        {
+          "name": "tool",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "ok",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": false
+        },
+        {
+          "name": "output",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "LogLine",
+      "fields": [
+        {
+          "name": "line",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "UsageDelta",
+      "fields": [
+        {
+          "name": "modelId",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "inputTokens",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": true
+        },
+        {
+          "name": "outputTokens",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": true
+        },
+        {
+          "name": "costCents",
+          "type": {
+            "k": "scalar",
+            "name": "Cents",
+            "base": "numeric"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "ArtifactRef",
+      "fields": [
+        {
+          "name": "artifactIdx",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "RawObservation",
+      "fields": [
+        {
+          "name": "source",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "data",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "OpenOptions",
+      "fields": [
+        {
+          "name": "configPath",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "sink",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Default: a managed local SQLite file. \"none\" = memory-only; any driver-plan DSN otherwise."
+        }
+      ]
+    },
+    {
+      "name": "DispatchSpec",
+      "fields": [
+        {
+          "name": "brief",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "env",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "agent",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "model",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "title",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "repo",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "gitRef",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "isolation",
+          "type": {
+            "k": "enum",
+            "name": "IsolationKind"
+          },
+          "nullable": true
+        },
+        {
+          "name": "template",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Named template to boot from."
+        },
+        {
+          "name": "setup",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Per-dispatch setup script. No secrets — those live in the template."
+        },
+        {
+          "name": "timeoutSecs",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": true
+        },
+        {
+          "name": "maxBudget",
+          "type": {
+            "k": "scalar",
+            "name": "Cents",
+            "base": "numeric"
+          },
+          "nullable": true
+        },
+        {
+          "name": "unchecked",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": true,
+          "doc": "Skip catalog validation of (env, agent, model); the env's own error becomes the report."
+        },
+        {
+          "name": "labels",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "SessionFilter",
+      "fields": [
+        {
+          "name": "env",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "state",
+          "type": {
+            "k": "enum",
+            "name": "SessionState"
+          },
+          "nullable": true
+        },
+        {
+          "name": "dispatchId",
+          "type": {
+            "k": "scalar",
+            "name": "DispatchId",
+            "base": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "EventOptions",
+      "fields": [
+        {
+          "name": "sessionUid",
+          "type": {
+            "k": "scalar",
+            "name": "SessionUid",
+            "base": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "afterIdx",
+          "type": {
+            "k": "scalar",
+            "name": "int64",
+            "base": "numeric"
+          },
+          "nullable": true
+        },
+        {
+          "name": "kinds",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "enum",
+              "name": "EventKind"
+            }
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "ReconcileReport",
+      "fields": [
+        {
+          "name": "adopted",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false
+        },
+        {
+          "name": "confirmed",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false
+        },
+        {
+          "name": "lost",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false
+        },
+        {
+          "name": "tornDown",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "name": "McpOptions",
+      "fields": [
+        {
+          "name": "transport",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Transport: \"stdio\" (v1)."
+        },
+        {
+          "name": "role",
+          "type": {
+            "k": "enum",
+            "name": "McpRole"
+          },
+          "nullable": true,
+          "doc": "Surface scope: supervisor = full; worker = observe-only. Default supervisor."
+        },
+        {
+          "name": "maxDepth",
+          "type": {
+            "k": "scalar",
+            "name": "int32",
+            "base": "numeric"
+          },
+          "nullable": true,
+          "doc": "Belt-and-braces viaMcpDepth ceiling (default 1)."
+        }
+      ]
+    },
+    {
+      "name": "DriverPlanOptions",
+      "fields": [
+        {
+          "name": "dialect",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "tables",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "scalar",
+              "name": "string"
+            }
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "Statement",
+      "fields": [
+        {
+          "name": "sql",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "params",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": false
+        }
+      ]
+    }
+  ]
+}

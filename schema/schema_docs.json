@@ -1,0 +1,610 @@
+[
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "version",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "A coding agent program (claude-code, codex, …).",
+    "name": "agents"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "session_uid",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "idx",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "kind",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Branch name, PR URL, path, … — a pointer, not the bytes.",
+        "name": "locator",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "meta",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "Something the session produced.",
+    "name": "artifacts"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "capability",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      }
+    ],
+    "desc": "One capability row (the edge target of Environment.capabilities).",
+    "name": "capabilities"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": true,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "title",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "The brief — the whole task spec, free-form. Structure belongs to consumers.",
+        "name": "brief",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Workspace: URL or local path; empty = no repo (pure-prompt work).",
+        "name": "repo",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "git_ref",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "isolation",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "template_name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Per-dispatch setup script — runs after the template's setup and the repo clone.",
+        "name": "setup",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "env_slug",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "agent_name",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "model_id",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "timeout_secs",
+        "notNull": false,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "max_budget",
+        "notNull": false,
+        "pk": false,
+        "type": "numeric"
+      },
+      {
+        "def": null,
+        "desc": "MCP recursion depth: 0 = dispatched by the host program.",
+        "name": "via_mcp_depth",
+        "notNull": true,
+        "pk": false,
+        "type": "integer"
+      },
+      {
+        "def": null,
+        "desc": "Consumer labels, opaque to disponent.",
+        "name": "labels",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "The immutable request. Never mutated after dispatch(); lifecycle lives on sessions.",
+    "name": "dispatches"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "slug",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Env-specific texture: poll granularity, supported template kinds, …",
+        "name": "detail",
+        "notNull": false,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "capability",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      }
+    ],
+    "desc": "What this env can do (closed vocabulary; open detail).",
+    "name": "env_capabilities"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "slug",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "kind",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "display_name",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Address only — never a credential (secrets live in config/templates).",
+        "name": "endpoint",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "last_probed_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": "Somewhere work can run. Config supplies these; the shipped catalog fills offerings + capabilities.",
+    "name": "environments"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "session_uid",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "idx",
+        "notNull": true,
+        "pk": true,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "ts",
+        "notNull": true,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "kind",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "fidelity",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "discriminator for payload (a EventPayload variant tag)",
+        "name": "payload_kind",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "payload",
+        "notNull": true,
+        "pk": false,
+        "type": "json"
+      }
+    ],
+    "desc": "One observation on a session's timeline (containment rides the key: the\nsession FK + the position, like Artifact/Usage — to-manys are queries).",
+    "name": "events"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "provider",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "family",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "A model an agent can run with.",
+    "name": "models"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "env_slug",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "agent_name",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "model_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "is_default",
+        "notNull": true,
+        "pk": false,
+        "type": "boolean"
+      }
+    ],
+    "desc": "env × agent × model availability (from the shipped catalog + config).",
+    "name": "offerings"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "uid",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "dispatch_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "state",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "The env's own handle(s): tmux session name, VM name, web session id/url.",
+        "name": "env_handle",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Human-facing view URL when the env has one (ttyd, web session page).",
+        "name": "url",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "resumed_from",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "started_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "ended_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "exit_reason",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "exit_detail",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Set by reap(): resources torn down, row archived. Null = still on the board.",
+        "name": "reaped_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": "One attempt at a dispatch, mirroring one env-side resource.",
+    "name": "sessions"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "name",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "kind",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "exe.dev template VM name, container image ref, …",
+        "name": "locator",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Baseline setup script — runs first, before the repo clone and the dispatch's setup.",
+        "name": "setup",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "note",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      }
+    ],
+    "desc": "A reusable starting state, curated out-of-band (auth baked in by hand).\nReference-only: disponent copies/runs what you name, never builds.",
+    "name": "templates"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "session_uid",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "model_id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "input_tokens",
+        "notNull": true,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "output_tokens",
+        "notNull": true,
+        "pk": false,
+        "type": "bigint"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "cost_cents",
+        "notNull": true,
+        "pk": false,
+        "type": "numeric"
+      }
+    ],
+    "desc": "Best-effort accounting, per session per model.",
+    "name": "usage"
+  }
+]

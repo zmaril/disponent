@@ -1,0 +1,5 @@
+# The fluessig dependency is a git pin; fetch it with the git CLI so ssh
+# url-rewrites (url.git@github.com:.insteadOf) and ssh-agent auth just work —
+# cargo's builtin libgit2 fetcher can't use the agent.
+[net]
+git-fetch-with-cli = true
