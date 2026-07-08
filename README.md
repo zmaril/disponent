@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="disponent" width="200"></p>
+
 # disponent
 
 Dispatch work to coding agents — locally in tmux or on remote environments
