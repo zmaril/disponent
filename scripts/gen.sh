@@ -40,4 +40,6 @@ cargo run -q --manifest-path "$FLUESSIG_DIR/Cargo.toml" --bin fluessig-gen -- \
   --api "$REPO/schema/api.json" \
   --mcp "$REPO/crates/disponent-core/src/mcp_generated.rs" \
   --node "$REPO/crates/disponent-node/src/generated.rs" \
+  --python "$REPO/crates/disponent-python/src/generated.rs" \
+  --ruby "$REPO/crates/disponent-ruby/src/generated.rs" \
   --banner-note 'straitjacket-allow-file:duplication — generated code repeats by design.'

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "disponent"
+version = "0.1.0"
+description = "Dispatch work to coding agents — the disponent engine, in-process in Python."
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# Build the crate as a CPython extension module (stable ABI via abi3).
+features = ["pyo3/extension-module"]
+# Mixed layout: the Rust ext (`disponent._disponent`) + the pure-Python
+# `python/disponent/` package that re-exports it.
+python-source = "python"
+module-name = "disponent._disponent"
+
+[dependency-groups]
+# Everything the test suite needs, declared ONCE (PEP 735). Install with
+# `uv pip install --group dev` (or pip >= 25.1). Runtime deps stay empty by
+# design — the engine is the compiled extension.
+dev = ["maturin>=1.7,<2.0", "pytest"]

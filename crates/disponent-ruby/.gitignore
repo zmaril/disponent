@@ -1,0 +1,9 @@
+# rb_sys / rake-compiler build outputs
+/target
+*.so
+*.bundle
+*.bundle.dSYM
+*.o
+*.def
+Makefile
+mkmf.log

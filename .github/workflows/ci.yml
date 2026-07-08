@@ -40,7 +40,7 @@ jobs:
           # The schema tool lives in its own repo; pin the SHA disponent
           # generates against (KEEP IN LOCKSTEP with the fluessig `rev` in
           # crates/disponent-core/Cargo.toml — one tool, one version).
-          FLUESSIG_REF: 15a2e1deaf122ebfdb6b6d392f59c111729397c1
+          FLUESSIG_REF: 0ee9d4672987d7c8a8762993d13860af7e25973e
         run: |
           # Clone into RUNNER_TEMP (outside the workspace) so it can't register
           # as drift in the git-clean check below. Fetch the pinned SHA directly
@@ -72,3 +72,53 @@ jobs:
           bun install
           bun run build
           bun run test
+
+  python:
+    name: python binding
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # deps live once in pyproject's [dependency-groups] (needs pip >= 25.1);
+      # the dry-run backend flags are set by the test suite's conftest.
+      - name: build + test
+        working-directory: crates/disponent-python
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet --group dev
+          .venv/bin/maturin develop --quiet
+          .venv/bin/python -m pytest tests/ -q
+
+  ruby:
+    name: ruby binding
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # deps live once in crates/disponent-ruby/Gemfile (bundler-cache runs bundle install)
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          working-directory: crates/disponent-ruby
+          bundler-cache: true
+      # rb_sys drives cargo through extconf/make; bindgen finds the runner's
+      # libclang on its own (no LIBCLANG_PATH needed on ubuntu images).
+      - name: build + test
+        working-directory: crates/disponent-ruby
+        env:
+          # Build into the workspace target dir so rust-cache covers the deps,
+          # in the dev profile — CI tests don't need optimized code.
+          RB_SYS_CARGO_PROFILE: dev
+          RB_SYS_CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          bundle exec ruby extconf.rb
+          make
+          bundle exec ruby -I. -Itest test/test_disponent.rb

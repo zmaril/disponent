@@ -7,6 +7,9 @@
 //! poll-until-terminal — event-loop specifics the shape templates exclude).
 //! The other `@manual` op, `serveMcp`, is deliberately absent here: a Node
 //! host wanting MCP runs the `disponent` CLI.
+//!
+//! straitjacket-allow-file:duplication — the `@manual wait()` poll loop mirrors
+//! the python binding's by design (parallel per-binding seams).
 
 mod core_impl;
 mod generated;

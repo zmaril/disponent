@@ -1,8 +1,10 @@
-//! The hand-written half of the binding: `DisponentCore` (the generated napi
-//! trait) implemented over the engine. The engine speaks the MCP-layer DTOs
-//! (wire strings, serde_json values); the napi layer speaks typed enums and
-//! JSON-as-string carriers — this file is the seam that converts between
-//! them, plus the two poll-stream dressings (events, driverPlan).
+//! The hand-written half of the binding: `DisponentCore` (the generated
+//! surface trait) implemented over the engine. The engine speaks the MCP-layer
+//! DTOs (wire strings, serde_json values); the binding layer speaks typed enums
+//! and JSON-as-string carriers — this file is the seam that converts between
+//! them, plus the two poll-stream dressings (events, driverPlan). Ported from
+//! the node binding's seam; nothing here is language-specific (no pyo3), so it
+//! stays byte-for-byte alongside the Ruby binding's copy.
 //!
 //! straitjacket-allow-file:duplication — the per-binding core_impl seam is
 //! deliberately parallel across the node/python/ruby bindings.
@@ -17,8 +19,8 @@ use disponent_core::Engine;
 
 use crate::generated::*;
 
-/// wire string ↔ napi enum, one macro per vocabulary (the enums are generated
-/// numeric napi enums; the engine stores the tsp wire strings).
+/// wire string ↔ binding enum, one macro per vocabulary (the enums are the
+/// generated numeric enums; the engine stores the tsp wire strings).
 macro_rules! wire_enum {
     ($ty:ty { $($variant:ident => $wire:literal),+ $(,)? }) => {
         impl WireEnum for $ty {
@@ -63,7 +65,7 @@ wire_enum!(IsolationKind {
     None => "none", Worktree => "worktree", Container => "container", Vm => "vm",
 });
 
-// ── engine DTO → napi DTO ──
+// ── engine DTO → binding DTO ──
 
 fn session_out(s: mcp::Session) -> anyhow::Result<Session> {
     Ok(Session {
@@ -115,7 +117,7 @@ fn offering_out(o: mcp::Offering) -> Offering {
     }
 }
 
-// ── napi DTO → engine DTO ──
+// ── binding DTO → engine DTO ──
 
 fn spec_in(spec: DispatchSpec) -> anyhow::Result<mcp::DispatchSpec> {
     Ok(mcp::DispatchSpec {
@@ -339,7 +341,9 @@ impl PollStream<Statement> for PlanStream {
     }
 }
 
-/// Is this napi-level state one reap can't revive?
+/// Is this binding-level state one reap can't revive? (Used by the @manual
+/// `wait()` where a binding offers it — Ruby doesn't, so it is dead there.)
+#[allow(dead_code)]
 pub(crate) fn is_terminal(state: SessionState) -> bool {
     matches!(
         state,
