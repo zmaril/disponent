@@ -232,6 +232,16 @@ impl EnvBackend for LocalTmux {
         LocalTmux::capture(self, handle)
     }
 
+    fn workspace_link(&self, handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
+        // The agent runs in <workDir>/task (provision creates and cds there),
+        // so that's what the editor should open. A doctored/absent handle
+        // yields no link rather than a panic.
+        let Some(work_dir) = handle["workDir"].as_str() else {
+            return Ok(None);
+        };
+        Ok(Some(format!("vscode://file{work_dir}/task")))
+    }
+
     fn survey(&self) -> anyhow::Result<Vec<(String, serde_json::Value)>> {
         if self.dry_run {
             return Ok(vec![]);

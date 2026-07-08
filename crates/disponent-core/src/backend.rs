@@ -62,6 +62,13 @@ pub trait EnvBackend: Send + Sync {
 
     /// A snapshot of the worker's terminal (poll-grade observation, scraped).
     fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String>;
+
+    /// An editor deep-link into this session's working directory, if the backend
+    /// can honestly provide one for the caller's machine. `None` = no honest link
+    /// (a remote env's files aren't on this machine, so we never fake one).
+    fn workspace_link(&self, _handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// What a backend hands the engine for a fresh worker.

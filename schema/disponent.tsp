@@ -352,6 +352,18 @@ model SessionFilter {
   state?: SessionState;
   dispatchId?: DispatchId;
 }
+
+/** An editor link into a session's working directory. */
+model WorkspaceLink {
+  /** The session this link addresses. */
+  sessionUid: SessionUid;
+  /** True when an honest editor link exists for this session's backend. */
+  available: boolean;
+  /** A vscode://file/… deep link into the working dir (local backends). Absent when unavailable. */
+  url?: url;
+  /** When available=false, an honest explanation of why (capability edge). */
+  detail?: string;
+}
 model EventOptions {
   sessionUid?: SessionUid;
   afterIdx?: int64;
@@ -398,6 +410,9 @@ interface Disponent {
   dispatch(spec: DispatchSpec): Session;
   @readonly session(uid: SessionUid): Session | null;
   @readonly sessions(filter?: SessionFilter): Session[];
+
+  /** Return an editor link (VS Code deep link) into the session's working directory, when the backend can honestly provide one. */
+  @readonly workspaceLink(sessionUid: SessionUid): WorkspaceLink;
   @readonly @stream events(options?: EventOptions): Event;
 
   send(sessionUid: SessionUid, input: string): void;

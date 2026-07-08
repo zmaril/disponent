@@ -261,6 +261,32 @@
       ]
     },
     {
+      "name": "WorkspaceLink",
+      "doc": "An editor link into a session's working directory.",
+      "fields": [
+        {
+          "name": "sessionUid",
+          "type": "SessionUid",
+          "nullable": false
+        },
+        {
+          "name": "available",
+          "type": "boolean",
+          "nullable": false
+        },
+        {
+          "name": "url",
+          "type": "url",
+          "nullable": true
+        },
+        {
+          "name": "detail",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
       "name": "EventOptions",
       "doc": null,
       "fields": [
@@ -703,6 +729,21 @@
             "list": {
               "model": "Session"
             }
+          }
+        },
+        {
+          "name": "workspaceLink",
+          "doc": "Return an editor link (VS Code deep link) into the session's working directory, when the backend can honestly provide one.",
+          "shape": "unary",
+          "readonly": true,
+          "params": [
+            {
+              "name": "sessionUid",
+              "type": "SessionUid"
+            }
+          ],
+          "returns": {
+            "model": "WorkspaceLink"
           }
         },
         {
