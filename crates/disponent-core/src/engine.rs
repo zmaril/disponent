@@ -24,8 +24,8 @@ use crate::backend::{EnvBackend, ExeDev, ProvisionRequest};
 use crate::catalog::{self, upsert};
 use crate::local::LocalTmux;
 use crate::mcp_generated::{
-    DispatchSpec, DriverPlanOptions, Environment, Event, EventOptions, ReconcileReport, Session,
-    SessionFilter, Statement,
+    DispatchSpec, DriverPlanOptions, Environment, Event, EventOptions, Offering, ReconcileReport,
+    Session, SessionFilter, Statement,
 };
 use crate::observe::{self, Observation};
 use crate::schema_gen::{TableSchema, DUCKDB_TABLES, PG_TABLES, SQLITE_TABLES};
@@ -605,6 +605,20 @@ fn provision_worker(
 impl crate::mcp_generated::DisponentMcp for Engine {
     fn environments(&self) -> anyhow::Result<Vec<Environment>> {
         Ok(self.ledger.lock().unwrap().environments.clone())
+    }
+
+    fn offerings(&self) -> anyhow::Result<Vec<Offering>> {
+        // Straight off the shipped catalog (the flattened env×agent×model table);
+        // no ledger state, so no lock needed.
+        Ok(catalog::OFFERINGS
+            .iter()
+            .map(|o| Offering {
+                env_slug: o.env.to_string(),
+                agent_name: o.agent.to_string(),
+                model_id: o.model.to_string(),
+                is_default: o.is_default,
+            })
+            .collect())
     }
 
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>> {

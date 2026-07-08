@@ -274,6 +274,16 @@ pub struct Environment {
     pub last_probed_at: Option<String>,
 }
 
+/// env × agent × model availability (from the shipped catalog + config).
+#[napi(object)]
+#[derive(Clone)]
+pub struct Offering {
+    pub env_slug: String,
+    pub agent_name: String,
+    pub model_id: String,
+    pub is_default: bool,
+}
+
 /// One attempt at a dispatch, mirroring one env-side resource.
 #[napi(object)]
 #[derive(Clone)]
@@ -309,6 +319,7 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn open(options: Option<OpenOptions>) -> anyhow::Result<Self>;
     fn environments(&self) -> anyhow::Result<Vec<Environment>>;
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>>;
+    fn offerings(&self) -> anyhow::Result<Vec<Offering>>;
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
@@ -415,6 +426,20 @@ impl Task for RefreshTask {
     type JsValue = Vec<Environment>;
     fn compute(&mut self) -> Result<Self::Output> {
         self.core.refresh(self.env_slug.clone()).map_err(err)
+    }
+    fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
+        Ok(o)
+    }
+}
+
+pub struct OfferingsTask {
+    core: Arc<crate::core_impl::DisponentImpl>,
+}
+impl Task for OfferingsTask {
+    type Output = Vec<Offering>;
+    type JsValue = Vec<Offering>;
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.core.offerings().map_err(err)
     }
     fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
         Ok(o)
@@ -570,6 +595,16 @@ impl Disponent {
         AsyncTask::new(RefreshTask {
             core: self.core.clone(),
             env_slug,
+        })
+    }
+    /// The offerings table: every env × agent × model the catalog knows, each
+    /// flagged `isDefault` when it's the pick for a dispatch that names only the
+    /// environment. Lets a consumer enumerate what can run where without reaching
+    /// for the raw driver plan.
+    #[napi(ts_return_type = "Promise<Offering[]>")]
+    pub fn offerings(&self) -> AsyncTask<OfferingsTask> {
+        AsyncTask::new(OfferingsTask {
+            core: self.core.clone(),
         })
     }
     #[napi(ts_return_type = "Promise<Session>")]

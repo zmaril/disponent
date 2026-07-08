@@ -402,6 +402,32 @@
       ]
     },
     {
+      "name": "Offering",
+      "doc": "env × agent × model availability (from the shipped catalog + config).",
+      "fields": [
+        {
+          "name": "envSlug",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "agentName",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "modelId",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "isDefault",
+          "type": "boolean",
+          "nullable": false
+        }
+      ]
+    },
+    {
       "name": "Session",
       "doc": "One attempt at a dispatch, mirroring one env-side resource.",
       "fields": [
@@ -611,6 +637,18 @@
           "returns": {
             "list": {
               "model": "Environment"
+            }
+          }
+        },
+        {
+          "name": "offerings",
+          "doc": "The offerings table: every env × agent × model the catalog knows, each\nflagged `isDefault` when it's the pick for a dispatch that names only the\nenvironment. Lets a consumer enumerate what can run where without reaching\nfor the raw driver plan.",
+          "shape": "unary",
+          "readonly": true,
+          "params": [],
+          "returns": {
+            "list": {
+              "model": "Offering"
             }
           }
         },

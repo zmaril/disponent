@@ -94,6 +94,16 @@ pub struct Environment {
     pub last_probed_at: Option<String>,
 }
 
+/// env × agent × model availability (from the shipped catalog + config).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Offering {
+    pub env_slug: String,
+    pub agent_name: String,
+    pub model_id: String,
+    pub is_default: bool,
+}
+
 /// One attempt at a dispatch, mirroring one env-side resource.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +146,7 @@ pub struct Event {
 pub trait DisponentMcp {
     fn environments(&self) -> anyhow::Result<Vec<Environment>>;
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>>;
+    fn offerings(&self) -> anyhow::Result<Vec<Offering>>;
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
@@ -172,6 +183,7 @@ pub fn dispatch<T0: DisponentMcp>(
             let env_slug: Option<String> = opt_arg(args, "envSlug")?;
             Ok(serde_json::to_value(disponent.refresh(env_slug)?)?)
         }
+        "disponent_offerings" => Ok(serde_json::to_value(disponent.offerings()?)?),
         "disponent_dispatch" => {
             let spec: DispatchSpec = arg(args, "spec")?;
             Ok(serde_json::to_value(disponent.dispatch(spec)?)?)
@@ -269,6 +281,18 @@ pub const TOOLS_JSON: &str = r###"{
         "type": "object"
       },
       "name": "disponent_refresh"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "description": "The offerings table: every env × agent × model the catalog knows, each\nflagged `isDefault` when it's the pick for a dispatch that names only the\nenvironment. Lets a consumer enumerate what can run where without reaching\nfor the raw driver plan.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "disponent_offerings"
     },
     {
       "description": "",
