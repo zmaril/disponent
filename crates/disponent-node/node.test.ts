@@ -7,8 +7,15 @@ import {
   EnvKind,
   EventKind,
   SessionState,
+  setEnv,
   version,
 } from "./index.js";
+
+// Backend dry-run flags must cross into the NATIVE process env — under Bun,
+// process.env assignments never reach the Rust engine (setEnv exists for
+// exactly this; see its doc).
+setEnv("DISPONENT_EXE_DRY_RUN", "1");
+setEnv("DISPONENT_LOCAL_DRY_RUN", "1");
 
 test("the addon loads and links the engine", () => {
   expect(version()).toContain("disponent-node");

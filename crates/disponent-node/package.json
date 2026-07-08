@@ -13,10 +13,10 @@
     "*.node"
   ],
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build": "napi build --platform --release --no-const-enum",
+    "build:debug": "napi build --platform --no-const-enum",
     "gen": "bash ../../scripts/gen.sh",
-    "test": "DISPONENT_EXE_DRY_RUN=1 DISPONENT_LOCAL_DRY_RUN=1 bun test"
+    "test": "bun test"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.4.2"
