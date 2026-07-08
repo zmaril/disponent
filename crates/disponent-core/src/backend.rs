@@ -175,31 +175,7 @@ impl ExeDev {
     }
 
     fn run(&self, argv: &[String], stdin: Option<&str>) -> anyhow::Result<String> {
-        use std::io::Write;
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]);
-        cmd.stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        if stdin.is_some() {
-            cmd.stdin(std::process::Stdio::piped());
-        }
-        let mut child = cmd.spawn().map_err(|e| anyhow!("spawn {}: {e}", argv[0]))?;
-        if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            pipe.write_all(text.as_bytes())?;
-        }
-        let out = child.wait_with_output()?;
-        let merged = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        )
-        .trim()
-        .to_string();
-        if out.status.success() {
-            Ok(merged)
-        } else {
-            bail!("{} failed: {merged}", argv.join(" "))
-        }
+        run_argv(argv, stdin)
     }
 
     /// `ssh exe.dev <args>` — a control-plane command (cp, tag, rm, ls, …).
@@ -302,60 +278,64 @@ impl ExeDev {
         Ok(parse_vm_list(&self.control(&["ls", "--json"])?))
     }
 
+    /// A tmux command against the worker's `-L disponent` server (dry-run:
+    /// empty success).
+    fn worker_tmux(&self, host: &str, tmux_args: &[&str]) -> anyhow::Result<String> {
+        if self.dry_run {
+            return Ok(String::new());
+        }
+        let mut args = vec!["tmux", "-L", "disponent"];
+        args.extend(tmux_args);
+        self.worker(host, &args, None)
+    }
+
     /// Stop the agent (kill its tmux session) but leave the VM for inspection —
     /// cancel's half of the cancel/reap split; reap is what deletes the VM.
     pub fn stop(&self, host: &str) -> anyhow::Result<()> {
-        if self.dry_run {
-            return Ok(());
-        }
-        self.worker(
-            host,
-            &["tmux", "-L", "disponent", "kill-session", "-t", "worker"],
-            None,
-        )
-        .map(|_| ())
+        self.worker_tmux(host, &["kill-session", "-t", "worker"])
+            .map(|_| ())
     }
 
     /// Type into the worker's tmux session (the agent's terminal).
     pub fn send(&self, host: &str, input: &str) -> anyhow::Result<()> {
-        if self.dry_run {
-            return Ok(());
-        }
-        self.worker(
-            host,
-            &[
-                "tmux",
-                "-L",
-                "disponent",
-                "send-keys",
-                "-t",
-                "worker",
-                input,
-                "Enter",
-            ],
-            None,
-        )
-        .map(|_| ())
+        self.worker_tmux(host, &["send-keys", "-t", "worker", input, "Enter"])
+            .map(|_| ())
     }
 
     /// A snapshot of the worker's terminal (poll-grade observation, scraped).
     pub fn capture(&self, host: &str) -> anyhow::Result<String> {
-        if self.dry_run {
-            return Ok(String::new());
-        }
-        self.worker(
-            host,
-            &[
-                "tmux",
-                "-L",
-                "disponent",
-                "capture-pane",
-                "-p",
-                "-t",
-                "worker",
-            ],
-            None,
-        )
+        self.worker_tmux(host, &["capture-pane", "-p", "-t", "worker"])
+    }
+}
+
+/// Run argv (optionally feeding stdin), merging stdout+stderr trimmed —
+/// non-zero exit becomes an error carrying the merged output. The one
+/// subprocess convention every backend shares.
+pub(crate) fn run_argv(argv: &[String], stdin: Option<&str>) -> anyhow::Result<String> {
+    use std::io::Write;
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if stdin.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut child = cmd.spawn().map_err(|e| anyhow!("spawn {}: {e}", argv[0]))?;
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        pipe.write_all(text.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    let merged = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .trim()
+    .to_string();
+    if out.status.success() {
+        Ok(merged)
+    } else {
+        bail!("{} failed: {merged}", argv.join(" "))
     }
 }
 

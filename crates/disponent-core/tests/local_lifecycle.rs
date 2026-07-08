@@ -12,6 +12,8 @@ use disponent_core::local::LocalTmux;
 use disponent_core::mcp_generated::{DispatchSpec, DisponentMcp, Session};
 use disponent_core::Engine;
 
+mod common;
+
 fn have_tmux() -> bool {
     std::process::Command::new("tmux")
         .arg("-V")
@@ -34,21 +36,7 @@ fn spec(brief: &str) -> DispatchSpec {
 }
 
 fn wait_for(engine: &Engine, uid: &str, state: &str) -> Session {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let s = engine.session(uid.to_string()).unwrap().unwrap();
-        if s.state == state {
-            return s;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "stuck in {} waiting for {state} ({:?} {:?})",
-            s.state,
-            s.exit_reason,
-            s.exit_detail
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    common::wait_for(engine, uid, state, Duration::from_secs(10))
 }
 
 #[test]

@@ -11,7 +11,7 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context};
 use serde_json::json;
 
-use crate::backend::{shq, EnvBackend, Provision, ProvisionRequest};
+use crate::backend::{run_argv, shq, EnvBackend, Provision, ProvisionRequest};
 
 /// tmux session names for disponent workers: `dsp-<session uid>`.
 const SESSION_PREFIX: &str = "dsp-";
@@ -67,24 +67,9 @@ impl LocalTmux {
     }
 
     fn tmux(&self, args: &[&str]) -> anyhow::Result<String> {
-        let out = Command::new("tmux")
-            .arg("-L")
-            .arg(&self.socket)
-            .args(args)
-            .output()
-            .map_err(|e| anyhow!("spawn tmux: {e}"))?;
-        let merged = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        )
-        .trim()
-        .to_string();
-        if out.status.success() {
-            Ok(merged)
-        } else {
-            bail!("tmux {}: {merged}", args.join(" "))
-        }
+        let mut argv = vec!["tmux".to_string(), "-L".to_string(), self.socket.clone()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        run_argv(&argv, None)
     }
 
     fn session_name(uid: &str) -> String {

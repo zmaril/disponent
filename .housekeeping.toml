@@ -1,0 +1,7 @@
+fleet = "zmaril/powderworks"
+
+[checks]
+# No dedicated website yet — the repo is the product.
+website = "off"
+# Adopted on enrollment; the fleet default is "recommended".
+conventional-commits = "required"
