@@ -930,17 +930,66 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         if session.reaped_at.is_some() {
             bail!("session {session_uid} is already reaped");
         }
+        let backend = kind.and_then(|k| self.backend_for(&k));
+        let handle = session.env_handle.clone();
+
+        // Delivery assessment: while the env is still LIVE (before teardown
+        // destroys the work dir), ask the backend whether the session shipped a
+        // diff. A coarse backend that can't diff returns None → nothing recorded
+        // (honest by omission). We only READ here; recording is deferred until
+        // after teardown succeeds, so a failed-then-retried reap can't
+        // double-emit. Detect-and-report only — no state change hangs off this.
+        let delivery = match (backend.as_ref(), handle.as_ref()) {
+            (Some(b), Some(h)) => b.delivery_signal(h),
+            _ => None,
+        };
+
         // Reap = resources torn down THEN the row archived — a teardown failure
         // errors out with the board unchanged, so reap can be retried.
-        let backend = kind.and_then(|k| self.backend_for(&k));
-        if let (Some(backend), Some(handle)) = (backend, session.env_handle.clone()) {
+        if let (Some(backend), Some(handle)) = (backend.as_ref(), handle.as_ref()) {
             backend
-                .teardown(&handle)
+                .teardown(handle)
                 .map_err(|e| anyhow!("teardown {handle}: {e} (reap again to retry)"))?;
         }
+
+        let mut mutations = Vec::new();
+        // Now the env is gone: safe to commit the delivery verdict. "shipped" if
+        // the work dir changed OR the session recorded any artifact; "empty"
+        // otherwise. One derived event, plus a refinement of exit_detail that
+        // APPENDS to (never clobbers) whatever the exit reason already set.
+        if let Some(changed) = delivery {
+            let artifacts = ledger
+                .events
+                .iter()
+                .filter(|e| e.session_uid == session_uid && e.kind == "artifact")
+                .count();
+            let shipped = changed || artifacts > 0;
+            let verdict = if shipped { "shipped" } else { "empty" };
+            let ev = ledger.push_event_graded(
+                &session_uid,
+                "raw",
+                "derived",
+                json!({"kind": "raw", "payload": {"source": "delivery", "data": {
+                    "worktree_changed": changed,
+                    "artifacts": artifacts,
+                    "verdict": verdict,
+                }}}),
+            );
+            mutations.push(event_mutation(&ev));
+            let note = if shipped {
+                "delivery: shipped"
+            } else {
+                "delivery: empty diff, no artifacts"
+            };
+            let session = ledger.session_mut(&session_uid)?;
+            session.exit_detail = Some(match session.exit_detail.take() {
+                Some(prev) if !prev.is_empty() => format!("{prev}; {note}"),
+                _ => note.to_string(),
+            });
+        }
+
         // Reap on a live session cancels it first — one call always clears the board.
         let session = ledger.session_mut(&session_uid)?;
-        let mut mutations = Vec::new();
         if !TERMINAL.contains(&session.state.as_str()) {
             let (_, event) = ledger.transition(&session_uid, "cancelled")?;
             mutations.push(event_mutation(&event));
