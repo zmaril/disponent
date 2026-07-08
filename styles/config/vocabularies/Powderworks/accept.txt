@@ -1,0 +1,11 @@
+[Hh]ousekeeper
+[Hh]ousekeeping
+Straitjacket
+[Pp]owderworks
+[Pp]owdermonkey
+Dependabot
+CODEOWNERS
+[Ll]ockfile
+stylelint
+proselint
+toml

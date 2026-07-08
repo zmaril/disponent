@@ -31,6 +31,8 @@ git clone https://github.com/zmaril/disponent && cd disponent
 cargo build --release        # → target/release/disponent
 ```
 
+Or run `scripts/dev.sh` to build the workspace and check the tools the backends need.
+
 Regenerating the schema-derived code needs a [fluessig](https://github.com/zmaril/fluessig)
 checkout (`../fluessig` or `FLUESSIG_DIR=<path>`): `scripts/gen.sh`.
 
