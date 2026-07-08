@@ -10,7 +10,9 @@ use anyhow::{anyhow, Context};
 use fluessig::data::{SqlCodec, Transaction};
 use fluessig::sql::Dialect;
 use rusqlite::Connection;
+use serde_json::json;
 
+use crate::mcp_generated::{DispatchSpec, Environment, Event, Session};
 use crate::schema_gen::SQLITE_TABLES;
 
 /// The emitted catalog — the same source the generated code came from, loaded
@@ -82,6 +84,130 @@ impl Sink {
         }
         Ok(())
     }
+
+    /// Everything the mirror remembers, for rehydrating a fresh engine's
+    /// ledger — the other half of `apply`. `None` sinks remember nothing.
+    pub fn restore(&self) -> anyhow::Result<Option<Restored>> {
+        let Sink::Sqlite { conn, .. } = self else {
+            return Ok(None);
+        };
+        let text = |row: &rusqlite::Row, i: usize| -> Option<String> { row.get(i).ok().flatten() };
+        let jsonv = |s: Option<String>| -> Option<serde_json::Value> {
+            s.and_then(|raw| serde_json::from_str(&raw).ok())
+        };
+
+        let mut restored = Restored::default();
+
+        let mut q = conn.prepare(
+            "SELECT slug, kind, display_name, endpoint, last_probed_at FROM environments",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(Environment {
+                slug: r.get(0)?,
+                kind: r.get(1)?,
+                display_name: r.get(2)?,
+                endpoint: r.get(3)?,
+                last_probed_at: r.get(4)?,
+            })
+        })?;
+        restored.environments = rows.collect::<Result<_, _>>()?;
+
+        let mut q = conn.prepare(
+            "SELECT id, created_at, title, brief, repo, git_ref, isolation, template_name, \
+             setup, env_slug, agent_name, model_id, timeout_secs, max_budget, labels \
+             FROM dispatches ORDER BY rowid",
+        )?;
+        let rows = q.query_map([], |r| {
+            // The stored row keeps the RESOLVED agent/model; the original
+            // ask's unset fields are gone — reconstruct the spec as resolved.
+            let spec = serde_json::from_value(json!({
+                "brief": r.get::<_, String>(3)?,
+                "env": r.get::<_, String>(9)?,
+                "agent": text(r, 10),
+                "model": text(r, 11),
+                "title": text(r, 2),
+                "repo": text(r, 4),
+                "gitRef": text(r, 5),
+                "isolation": text(r, 6),
+                "template": text(r, 7),
+                "setup": text(r, 8),
+                "timeoutSecs": r.get::<_, Option<i64>>(12).ok().flatten(),
+                "maxBudget": text(r, 13),
+                "labels": jsonv(text(r, 14)),
+            }))
+            .expect("a stored dispatch row deserializes");
+            Ok(RestoredDispatch {
+                id: r.get(0)?,
+                created_at: r.get(1)?,
+                spec,
+                agent: r.get(10)?,
+                model: r.get(11)?,
+            })
+        })?;
+        restored.dispatches = rows.collect::<Result<_, _>>()?;
+
+        let mut q = conn.prepare(
+            "SELECT uid, dispatch_id, state, env_handle, url, resumed_from, started_at, \
+             ended_at, exit_reason, exit_detail, reaped_at FROM sessions ORDER BY rowid",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(Session {
+                uid: r.get(0)?,
+                dispatch_id: r.get(1)?,
+                state: r.get(2)?,
+                env_handle: jsonv(text(r, 3)),
+                url: r.get(4)?,
+                resumed_from: r.get(5)?,
+                started_at: r.get(6)?,
+                ended_at: r.get(7)?,
+                exit_reason: r.get(8)?,
+                exit_detail: r.get(9)?,
+                reaped_at: r.get(10)?,
+            })
+        })?;
+        restored.sessions = rows.collect::<Result<_, _>>()?;
+
+        // rowid preserves cross-session observation order (the events cursor's
+        // contract); the twin columns fold back into the payload envelope.
+        let mut q = conn.prepare(
+            "SELECT session_uid, idx, ts, kind, fidelity, payload_kind, payload \
+             FROM events ORDER BY rowid",
+        )?;
+        let rows = q.query_map([], |r| {
+            let body = text(r, 6)
+                .map(|raw| serde_json::from_str(&raw).unwrap_or(serde_json::Value::String(raw)))
+                .unwrap_or(serde_json::Value::Null);
+            Ok(Event {
+                session_uid: r.get(0)?,
+                idx: r.get(1)?,
+                ts: r.get(2)?,
+                kind: r.get(3)?,
+                fidelity: r.get(4)?,
+                payload: json!({"kind": r.get::<_, String>(5)?, "payload": body}),
+            })
+        })?;
+        restored.events = rows.collect::<Result<_, _>>()?;
+
+        Ok(Some(restored))
+    }
+}
+
+/// A sink's memory, ledger-shaped (dispatches carry the resolved agent/model
+/// alongside the reconstructed spec — the engine's DispatchRow split).
+#[derive(Default)]
+pub struct Restored {
+    pub environments: Vec<Environment>,
+    pub dispatches: Vec<RestoredDispatch>,
+    pub sessions: Vec<Session>,
+    pub events: Vec<Event>,
+}
+
+pub struct RestoredDispatch {
+    pub id: String,
+    pub created_at: String,
+    pub spec: DispatchSpec,
+    pub agent: String,
+    pub model: Option<String>,
 }
 
 /// JSON param → SQLite value. Structured values (objects/arrays) land as their

@@ -95,19 +95,44 @@ impl Engine {
         )
     }
 
-    /// The composable front door: any sink spec, any backend set.
+    /// The composable front door: any sink spec, any backend set. A sink that
+    /// remembers earlier runs rehydrates the ledger — restarts serve the full
+    /// board, not just what reconcile can re-discover live.
     pub fn open_with(
         sink: Option<&str>,
         backends: Vec<Arc<dyn EnvBackend>>,
     ) -> anyhow::Result<Self> {
         let mut sink = Sink::open(sink)?;
         sink.apply(&catalog::seed_tx())?;
+        let mut ledger = Ledger {
+            environments: catalog::environments(),
+            ..Ledger::default()
+        };
+        if let Some(restored) = sink.restore()? {
+            // The shipped catalog stays the baseline; stored rows contribute
+            // only what the seed doesn't know (probe timestamps).
+            for env in &mut ledger.environments {
+                if let Some(saved) = restored.environments.iter().find(|e| e.slug == env.slug) {
+                    env.last_probed_at = saved.last_probed_at.clone();
+                }
+            }
+            ledger.dispatches = restored
+                .dispatches
+                .into_iter()
+                .map(|d| DispatchRow {
+                    id: d.id,
+                    created_at: d.created_at,
+                    spec: d.spec,
+                    agent: d.agent,
+                    model: d.model,
+                })
+                .collect();
+            ledger.sessions = restored.sessions;
+            ledger.events = restored.events;
+        }
+        ledger.sink = sink;
         Ok(Engine {
-            ledger: Arc::new(Mutex::new(Ledger {
-                environments: catalog::environments(),
-                sink,
-                ..Ledger::default()
-            })),
+            ledger: Arc::new(Mutex::new(ledger)),
             backends,
         })
     }

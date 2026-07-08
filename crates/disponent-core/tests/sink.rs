@@ -76,3 +76,61 @@ fn sqlite_mirror_tracks_the_ledger() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn reopen_rehydrates_the_ledger() {
+    let path = std::env::temp_dir().join(format!(
+        "disponent-rehydrate-{}.sqlite3",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let (uid, dispatch_id) = {
+        let engine = Engine::open_with(Some(path.to_str().unwrap()), vec![]).unwrap();
+        let spec: DispatchSpec = serde_json::from_value(serde_json::json!({
+            "brief": "outlive the process",
+            "env": "local",
+            "title": "rehydrate me",
+            "labels": {"k": "v"},
+        }))
+        .unwrap();
+        let s = engine.dispatch(spec).unwrap();
+        engine.cancel(s.uid.clone()).unwrap();
+        (s.uid, s.dispatch_id)
+    }; // first disponent dies
+
+    let engine = Engine::open_with(Some(path.to_str().unwrap()), vec![]).unwrap();
+    let session = engine.session(uid.clone()).unwrap().expect("rehydrated");
+    assert_eq!(session.state, "cancelled");
+    assert_eq!(session.dispatch_id, dispatch_id);
+
+    // the dispatch row came back too: env-filtered listing works through it
+    let by_env = engine
+        .sessions(Some(
+            serde_json::from_value(serde_json::json!({"env": "local"})).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(by_env.len(), 1);
+
+    // events kept order and their payload envelopes
+    let events = engine
+        .events(
+            Some(serde_json::from_value(serde_json::json!({"sessionUid": uid})).unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, "log");
+    assert_eq!(events[1].payload["kind"], "state");
+    assert_eq!(events[1].payload["payload"]["to"], "cancelled");
+
+    // lifecycle ops work on rehydrated rows, and the result survives ANOTHER restart
+    let reaped = engine.reap(uid.clone()).unwrap();
+    assert!(reaped.reaped_at.is_some());
+    drop(engine);
+    let third = Engine::open_with(Some(path.to_str().unwrap()), vec![]).unwrap();
+    assert!(third.session(uid).unwrap().unwrap().reaped_at.is_some());
+
+    let _ = std::fs::remove_file(&path);
+}
