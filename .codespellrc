@@ -1,0 +1,4 @@
+[codespell]
+skip = ./.git,./node_modules,./.venv,./dist,./build,./.mypy_cache,./.ruff_cache,./.pytest_cache,./notes,*.lock,*.svg,*.min.js,*.min.css
+ignore-words-list = edn,afterall,unparseable
+check-hidden = true

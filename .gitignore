@@ -8,3 +8,7 @@ crates/disponent-node/index.js
 crates/disponent-node/index.d.ts
 crates/disponent-node/*.node
 node_modules/
+
+# vale-synced style packages (vale sync regenerates them; keep only our config)
+styles/*
+!styles/config
