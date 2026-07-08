@@ -7,6 +7,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Node binding (`@disponent/node`, napi-rs): the engine in-process in
+  Node/Bun. The napi surface is generated from the catalog (classes,
+  Promises, poll-streams for events/driverPlan); `wait()` is the hand-written
+  `@manual` op. `cd crates/disponent-node && bun install && bun run build`.
 - Local tmux backend: dispatch to `env: local` runs the agent on this machine
   in a `tmux -L disponent` session over a managed work dir, with the same
   clone → setup → agent order, cancel/reap split, and reconcile adoption as

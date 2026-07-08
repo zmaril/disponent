@@ -21,6 +21,9 @@ schema/*.json             emitted catalog/api/docs — generated, committed.
 crates/disponent-core     the engine (sync Rust): shipped catalog, ledger,
                           generated schema_gen.rs + mcp_generated.rs.
 crates/disponent-cli      the `disponent` binary; `disponent mcp` is the stdio server.
+crates/disponent-node     napi binding: the engine in-process in Node/Bun (generated
+                          surface + hand-written core_impl seam; builds via @napi-rs/cli,
+                          excluded from the default cargo set).
 notes/design.md           the design doc (phases, MVP topology, decisions).
 scripts/gen.sh            the regen chain (needs fluessig: ../fluessig or FLUESSIG_DIR).
 ```
@@ -30,6 +33,10 @@ scripts/gen.sh            the regen chain (needs fluessig: ../fluessig or FLUESS
 ```sh
 cargo build --release
 cargo test                # engine unit tests + the end-to-end stdio round-trip
+
+# the napi addon -> .node + index.js + index.d.ts
+cd crates/disponent-node && bun install && bun run build
+bun run test              # the binding lifecycle over dry-run backends
 cargo fmt --all --check && cargo clippy --all-targets -- -D warnings
 scripts/gen.sh            # schema/disponent.tsp → every generated artifact
 ```

@@ -1,0 +1,20 @@
+[package]
+name = "disponent-node"
+description = "Node-API (napi-rs) binding: the disponent engine, in-process in Node/Bun."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+disponent-core = { path = "../disponent-core" }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

@@ -2,3 +2,9 @@
 node_modules/
 *.sqlite3
 *.db
+
+# node binding build artifacts (napi CLI regenerates them)
+crates/disponent-node/index.js
+crates/disponent-node/index.d.ts
+crates/disponent-node/*.node
+node_modules/
