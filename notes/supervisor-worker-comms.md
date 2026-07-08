@@ -399,7 +399,7 @@ box that calls `send` into a session) and an **event feed** (a live render of
 1. A worker `ask`s. This mints a `Question` and a `question` event on the
    session timeline. pm's **event feed already tails `events`**, so the question
    surfaces in the feed the moment it lands — no new subscription, just a new
-   `EventKind` the feed learns to render (as a highlighted "❓ needs a decision"
+   `EventKind` the feed learns to render (as a highlighted "needs a decision"
    card rather than a log line).
 2. The supervisor (the Claude driving pm, or the human at the pm UI) sees it and
    picks one of two affordances the composer grows:
@@ -543,7 +543,7 @@ worker wk-B: ask("Migration 0007 drops `users.legacy_id`, which still has data. 
              // event: question@wk-B  (fidelity: exact)
 
 // pm's event feed (tailing `events`, per pm#158) renders q1 as a
-// "❓ needs a decision" card in wk-B's lane.
+// "needs a decision" card in wk-B's lane.
 
 supervisor:  questions({ status: "open" })  → [ Question{id:q1, …} ]
              // The supervisor Claude judges: dropping data needs the human.
