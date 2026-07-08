@@ -16,8 +16,9 @@ use anyhow::{anyhow, bail};
 /// how to set it up, and the brief the agent starts with.
 pub struct ProvisionRequest {
     pub session_uid: String,
-    /// The exe.dev template VM name (already authed: claude + gh + tmux + ttyd).
-    pub template: String,
+    /// The env-side base image to copy (exe.dev template VM name); backends
+    /// with `requires_template()` reject a dispatch without one.
+    pub template: Option<String>,
     /// `owner/repo` (gh-clonable) — empty means pure-prompt work, no clone.
     pub repo: Option<String>,
     /// Per-dispatch setup, run after the template's baseline and the clone.
@@ -29,6 +30,94 @@ pub struct Provisioned {
     pub vm_name: String,
     pub host: String,
     pub url: String,
+}
+
+/// One environment family (exe.dev VMs, local tmux, …): provision workers,
+/// poke them, tear them down, and answer "what's out there" for reconcile.
+/// Handles are opaque JSON at the engine level — each backend defines and
+/// parses its own shape.
+pub trait EnvBackend: Send + Sync {
+    /// Matches the EnvKind wire value ("exe_dev", "local", …).
+    fn kind(&self) -> &'static str;
+
+    /// Does dispatch demand a template (an env-side base image to copy)?
+    fn requires_template(&self) -> bool;
+
+    fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<Provision>;
+
+    /// Stop the agent, keep the environment for inspection (cancel's half).
+    fn stop(&self, handle: &serde_json::Value) -> anyhow::Result<()>;
+
+    fn send(&self, handle: &serde_json::Value, input: &str) -> anyhow::Result<()>;
+
+    /// Destroy the environment's resources (reap's half).
+    fn teardown(&self, handle: &serde_json::Value) -> anyhow::Result<()>;
+
+    /// The sessions discoverable in the environment right now, as
+    /// (session_uid, handle) — what reconcile confirms/adopts against.
+    fn survey(&self) -> anyhow::Result<Vec<(String, serde_json::Value)>>;
+}
+
+/// What a backend hands the engine for a fresh worker.
+pub struct Provision {
+    pub handle: serde_json::Value,
+    pub url: Option<String>,
+}
+
+fn handle_str(handle: &serde_json::Value, key: &str) -> anyhow::Result<String> {
+    handle[key]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("handle has no '{key}': {handle}"))
+}
+
+impl EnvBackend for ExeDev {
+    fn kind(&self) -> &'static str {
+        "exe_dev"
+    }
+
+    fn requires_template(&self) -> bool {
+        true
+    }
+
+    fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<Provision> {
+        // (inherent method — resolution prefers it over this trait method)
+        let p = ExeDev::provision(self, req)?;
+        Ok(Provision {
+            handle: serde_json::json!({"vmName": p.vm_name, "host": p.host}),
+            url: Some(p.url),
+        })
+    }
+
+    fn stop(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
+        ExeDev::stop(self, &handle_str(handle, "host")?)
+    }
+
+    fn send(&self, handle: &serde_json::Value, input: &str) -> anyhow::Result<()> {
+        ExeDev::send(self, &handle_str(handle, "host")?, input)
+    }
+
+    fn teardown(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
+        ExeDev::teardown(self, &handle_str(handle, "vmName")?)
+    }
+
+    fn survey(&self) -> anyhow::Result<Vec<(String, serde_json::Value)>> {
+        Ok(self
+            .list()?
+            .iter()
+            .filter_map(|vm| {
+                session_of(vm).map(|uid| {
+                    (
+                        uid.to_string(),
+                        serde_json::json!({
+                            "vmName": vm.vm_name,
+                            "host": self.host(&vm.vm_name),
+                        }),
+                    )
+                })
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -145,7 +234,11 @@ impl ExeDev {
             return Ok(Provisioned { vm_name, host, url });
         }
 
-        self.control(&["cp", &req.template, &vm_name])
+        let template = req
+            .template
+            .as_deref()
+            .ok_or_else(|| anyhow!("exe.dev provisioning needs a template"))?;
+        self.control(&["cp", template, &vm_name])
             .map_err(|e| anyhow!("exe.dev cp: {e}"))?;
 
         // Tagging maps VM → session for reconcile/adoption — it's what makes an
@@ -391,7 +484,7 @@ mod tests {
     fn req(repo: Option<&str>, setup: Option<&str>) -> ProvisionRequest {
         ProvisionRequest {
             session_uid: "0198-abc-def0-123456789abc".into(),
-            template: "claude-base".into(),
+            template: Some("claude-base".into()),
             repo: repo.map(String::from),
             setup: setup.map(String::from),
             brief: "do the thing".into(),

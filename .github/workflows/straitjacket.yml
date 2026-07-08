@@ -1,0 +1,16 @@
+name: straitjacket
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  straitjacket:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: zmaril/straitjacket@v0.2.3
+        with:
+          version: v0.2.3
+          sarif: "false"

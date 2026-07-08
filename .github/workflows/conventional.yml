@@ -1,0 +1,20 @@
+name: conventional
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: PR title follows conventional commits
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "$TITLE" | grep -qE \
+            '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9./_-]+\))?!?: .+' || {
+            echo "PR title must follow conventional commits: type(scope): summary"
+            echo "see https://www.conventionalcommits.org"
+            exit 1
+          }

@@ -1,0 +1,277 @@
+//! The local backend: run the agent on this machine, in tmux — the same
+//! shape as an exe.dev worker but the "environment" is a managed work dir
+//! plus a `tmux -L disponent` session named after the session uid. Cancel
+//! kills the tmux session and keeps the work dir for inspection; reap
+//! removes the work dir too. Survey lists the tmux sessions, so reconcile
+//! adopts local runs a previous disponent left behind.
+
+use std::path::PathBuf;
+use std::process::Command;
+
+use anyhow::{anyhow, bail, Context};
+use serde_json::json;
+
+use crate::backend::{shq, EnvBackend, Provision, ProvisionRequest};
+
+/// tmux session names for disponent workers: `dsp-<session uid>`.
+const SESSION_PREFIX: &str = "dsp-";
+
+pub struct LocalTmux {
+    /// The tmux socket name (`tmux -L …`) — separate from the user's own server.
+    socket: String,
+    /// Work dirs live here, one per session uid.
+    root: PathBuf,
+    /// The agent command line; the brief is appended as its final argument.
+    agent_cmd: String,
+    dry_run: bool,
+}
+
+impl LocalTmux {
+    /// The real backend, `DISPONENT_LOCAL_*` env overrides honored.
+    pub fn from_env() -> Self {
+        let var = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        LocalTmux {
+            socket: var("DISPONENT_LOCAL_SOCKET", "disponent"),
+            root: PathBuf::from(var(
+                "DISPONENT_LOCAL_ROOT",
+                &format!("{home}/.disponent/work"),
+            )),
+            agent_cmd: var(
+                "DISPONENT_LOCAL_AGENT",
+                &format!(
+                    "claude {}",
+                    var("DISPONENT_CLAUDE_FLAGS", "--dangerously-skip-permissions")
+                ),
+            ),
+            dry_run: std::env::var("DISPONENT_LOCAL_DRY_RUN").is_ok(),
+        }
+    }
+
+    /// Every command fabricated, nothing spawned — the engine tests' backend.
+    pub fn dry_run() -> Self {
+        LocalTmux {
+            dry_run: true,
+            ..LocalTmux::from_env()
+        }
+    }
+
+    /// A real backend sandboxed for tests: own socket + root, a stand-in agent.
+    pub fn sandboxed(socket: &str, root: PathBuf, agent_cmd: &str) -> Self {
+        LocalTmux {
+            socket: socket.to_string(),
+            root,
+            agent_cmd: agent_cmd.to_string(),
+            dry_run: false,
+        }
+    }
+
+    fn tmux(&self, args: &[&str]) -> anyhow::Result<String> {
+        let out = Command::new("tmux")
+            .arg("-L")
+            .arg(&self.socket)
+            .args(args)
+            .output()
+            .map_err(|e| anyhow!("spawn tmux: {e}"))?;
+        let merged = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .trim()
+        .to_string();
+        if out.status.success() {
+            Ok(merged)
+        } else {
+            bail!("tmux {}: {merged}", args.join(" "))
+        }
+    }
+
+    fn session_name(uid: &str) -> String {
+        format!("{SESSION_PREFIX}{uid}")
+    }
+
+    fn handle(&self, uid: &str) -> serde_json::Value {
+        json!({
+            "tmux": Self::session_name(uid),
+            "socket": self.socket,
+            "workDir": self.root.join(uid),
+        })
+    }
+
+    /// A snapshot of the worker's terminal (poll-grade observation, scraped).
+    pub fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String> {
+        if self.dry_run {
+            return Ok(String::new());
+        }
+        let name = handle["tmux"]
+            .as_str()
+            .ok_or_else(|| anyhow!("handle has no 'tmux': {handle}"))?;
+        self.tmux(&["capture-pane", "-p", "-t", name])
+    }
+}
+
+/// `owner/repo` is a gh slug; anything with a scheme, a colon, or an existing
+/// path is for `git clone` directly.
+fn is_gh_slug(repo: &str) -> bool {
+    repo.split('/').count() == 2
+        && !repo.contains(':')
+        && !repo.starts_with('.')
+        && !repo.starts_with('/')
+        && !std::path::Path::new(repo).exists()
+}
+
+impl EnvBackend for LocalTmux {
+    fn kind(&self) -> &'static str {
+        "local"
+    }
+
+    fn requires_template(&self) -> bool {
+        false
+    }
+
+    fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<Provision> {
+        let handle = self.handle(&req.session_uid);
+        if self.dry_run {
+            return Ok(Provision { handle, url: None });
+        }
+
+        let work = self.root.join(&req.session_uid);
+        let task = work.join("task");
+        std::fs::create_dir_all(&task).with_context(|| format!("mkdir {}", task.display()))?;
+        std::fs::write(work.join("brief.md"), &req.brief)?;
+
+        let sh = |script: &str, dir: &std::path::Path, stage: &str| -> anyhow::Result<()> {
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .current_dir(dir)
+                .output()
+                .map_err(|e| anyhow!("{stage}: spawn bash: {e}"))?;
+            if !out.status.success() {
+                bail!("{stage}: {}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            Ok(())
+        };
+
+        // clone → setup → agent, the same order as the remote bootstrap
+        if let Some(repo) = req.repo.as_deref().filter(|r| !r.is_empty()) {
+            let clone = if is_gh_slug(repo) {
+                format!("gh repo clone {} task", shq(repo))
+            } else {
+                format!("git clone {} task", shq(repo))
+            };
+            std::fs::remove_dir_all(&task).ok();
+            sh(&clone, &work, "clone")?;
+        }
+        if let Some(setup) = req.setup.as_deref().filter(|s| !s.is_empty()) {
+            sh(setup, &task, "setup")?;
+        }
+
+        // The runner keeps the brief out of the tmux command string (it's
+        // `cat`-ed at launch), mirroring the remote convention.
+        let runner = work.join("run.sh");
+        std::fs::write(
+            &runner,
+            format!(
+                "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")/task\"\n{} \"$(cat ../brief.md)\" || true\nexec bash\n",
+                self.agent_cmd
+            ),
+        )?;
+        sh(
+            &format!("chmod +x {}", shq(&runner.display().to_string())),
+            &work,
+            "runner",
+        )?;
+
+        self.tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            &Self::session_name(&req.session_uid),
+            "-x",
+            "220",
+            "-y",
+            "50",
+            &runner.display().to_string(),
+        ])?;
+        Ok(Provision { handle, url: None })
+    }
+
+    fn stop(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let name = handle["tmux"]
+            .as_str()
+            .ok_or_else(|| anyhow!("handle has no 'tmux': {handle}"))?;
+        // Already-gone is stopped enough.
+        let _ = self.tmux(&["kill-session", "-t", name]);
+        Ok(())
+    }
+
+    fn send(&self, handle: &serde_json::Value, input: &str) -> anyhow::Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let name = handle["tmux"]
+            .as_str()
+            .ok_or_else(|| anyhow!("handle has no 'tmux': {handle}"))?;
+        self.tmux(&["send-keys", "-t", name, "-l", input])?;
+        self.tmux(&["send-keys", "-t", name, "Enter"]).map(|_| ())
+    }
+
+    fn teardown(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+        self.stop(handle)?;
+        if let Some(dir) = handle["workDir"].as_str() {
+            // Only remove dirs we manage — never follow a doctored handle
+            // outside the root.
+            let dir = PathBuf::from(dir);
+            if dir.starts_with(&self.root) && dir != self.root {
+                std::fs::remove_dir_all(&dir).ok();
+            }
+        }
+        Ok(())
+    }
+
+    fn survey(&self) -> anyhow::Result<Vec<(String, serde_json::Value)>> {
+        if self.dry_run {
+            return Ok(vec![]);
+        }
+        // No tmux server on this socket = nothing running (not an error).
+        let Ok(listing) = self.tmux(&["list-sessions", "-F", "#S"]) else {
+            return Ok(vec![]);
+        };
+        Ok(listing
+            .lines()
+            .filter_map(|name| name.strip_prefix(SESSION_PREFIX))
+            .map(|uid| (uid.to_string(), self.handle(uid)))
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gh_slugs_vs_clonable_urls_and_paths() {
+        assert!(is_gh_slug("zmaril/entl"));
+        assert!(!is_gh_slug("https://github.com/zmaril/entl"));
+        assert!(!is_gh_slug("git@github.com:zmaril/entl.git"));
+        assert!(!is_gh_slug("./some/local"));
+        assert!(!is_gh_slug("/abs/path"));
+        assert!(!is_gh_slug("plain"));
+    }
+
+    #[test]
+    fn handles_name_the_session_and_stay_under_root() {
+        let b = LocalTmux::dry_run();
+        let h = b.handle("abc-123");
+        assert_eq!(h["tmux"], "dsp-abc-123");
+        assert!(h["workDir"].as_str().unwrap().ends_with("abc-123"));
+    }
+}

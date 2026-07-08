@@ -9,6 +9,7 @@
 pub mod backend;
 pub mod catalog;
 pub mod engine;
+pub mod local;
 pub mod mcp_generated;
 pub mod schema_gen;
 pub mod sink;

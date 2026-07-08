@@ -1,12 +1,12 @@
 //! The engine: an in-memory ledger behind the generated `DisponentMcp` trait,
 //! mirrored into the sink (SQLite by default) as fluessig plans.
 //!
-//! Phase-2 semantics, stated plainly: there are no live env backends yet, so a
-//! dispatch is *accepted* (validated against the catalog, minted, recorded,
-//! mirrored) and its session sits `queued` until a backend picks it up in
-//! phase 3. Everything the trait can answer from the ledger — sessions,
-//! events, cancel/reap lifecycle, driverPlan — is real; everything that needs
-//! an environment (send, resume) says so instead of pretending.
+//! Dispatch routes by environment kind to a registered backend (exe.dev VMs,
+//! local tmux) and provisions on a background thread; a kind with no backend
+//! queues honestly. Environments stay the source of truth — the ledger is the
+//! reconciled cache, and `reconcile()` confirms/loses/adopts against each
+//! backend's survey. Ops a version can't do yet (resume) say so instead of
+//! pretending.
 
 use std::sync::{Arc, Mutex};
 
@@ -17,8 +17,9 @@ use fluessig::sql::Dialect;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::backend::{self, ExeDev, ProvisionRequest};
+use crate::backend::{EnvBackend, ExeDev, ProvisionRequest};
 use crate::catalog::{self, upsert};
+use crate::local::LocalTmux;
 use crate::mcp_generated::{
     DispatchSpec, DriverPlanOptions, Environment, Event, EventOptions, ReconcileReport, Session,
     SessionFilter, Statement,
@@ -34,8 +35,8 @@ const DEFAULT_PAGE: usize = 100;
 
 pub struct Engine {
     ledger: Arc<Mutex<Ledger>>,
-    /// The exe.dev backend; None = nothing runs work (sessions queue honestly).
-    backend: Option<Arc<ExeDev>>,
+    /// One backend per environment kind; a kind with no backend queues honestly.
+    backends: Vec<Arc<dyn EnvBackend>>,
 }
 
 #[derive(Default)]
@@ -70,21 +71,35 @@ impl Default for Engine {
 }
 
 impl Engine {
-    /// Memory-only, no backend (tests, throwaways). `open` is the front door.
+    /// Memory-only, no backends (tests, throwaways). `open` is the front door.
     pub fn new() -> Self {
         Engine {
             ledger: Arc::new(Mutex::new(Ledger {
                 environments: catalog::environments(),
                 ..Ledger::default()
             })),
-            backend: None,
+            backends: Vec::new(),
         }
     }
 
-    /// An engine over the shipped catalog with the real exe.dev backend.
-    /// `sink`: `None` = the managed SQLite file (~/.disponent), `"none"` =
-    /// memory only, anything else = a SQLite path.
+    /// An engine over the shipped catalog with the real backends (exe.dev +
+    /// local tmux). `sink`: `None` = the managed SQLite file (~/.disponent),
+    /// `"none"` = memory only, anything else = a SQLite path.
     pub fn open(sink: Option<&str>) -> anyhow::Result<Self> {
+        Engine::open_with(
+            sink,
+            vec![
+                Arc::new(ExeDev::from_env()),
+                Arc::new(LocalTmux::from_env()),
+            ],
+        )
+    }
+
+    /// The composable front door: any sink spec, any backend set.
+    pub fn open_with(
+        sink: Option<&str>,
+        backends: Vec<Arc<dyn EnvBackend>>,
+    ) -> anyhow::Result<Self> {
         let mut sink = Sink::open(sink)?;
         sink.apply(&catalog::seed_tx())?;
         Ok(Engine {
@@ -93,16 +108,20 @@ impl Engine {
                 sink,
                 ..Ledger::default()
             })),
-            backend: Some(Arc::new(ExeDev::from_env())),
+            backends,
         })
     }
 
-    /// Memory-only over an injected backend (the dry-run tests' front door).
-    pub fn with_backend(backend: ExeDev) -> Self {
+    /// Memory-only over one injected backend (the dry-run tests' front door).
+    pub fn with_backend<B: EnvBackend + 'static>(backend: B) -> Self {
         Engine {
-            backend: Some(Arc::new(backend)),
+            backends: vec![Arc::new(backend)],
             ..Engine::new()
         }
+    }
+
+    fn backend_for(&self, kind: &str) -> Option<Arc<dyn EnvBackend>> {
+        self.backends.iter().find(|b| b.kind() == kind).cloned()
     }
 }
 
@@ -272,21 +291,29 @@ impl Ledger {
     fn mirror(&mut self, mutations: Vec<Mutation>) -> anyhow::Result<()> {
         self.sink.apply(&Transaction { mutations })
     }
-}
 
-/// The (vmName, host) a session's worker answers on, if it has one.
-fn handle_of(session: &Session) -> Option<(String, String)> {
-    let h = session.env_handle.as_ref()?;
-    Some((
-        h["vmName"].as_str()?.to_string(),
-        h["host"].as_str()?.to_string(),
-    ))
+    /// The environment kind a session runs in (via its dispatch's env slug).
+    fn env_kind_of(&self, uid: &str) -> Option<String> {
+        let session = self.sessions.iter().find(|s| s.uid == uid)?;
+        let dispatch = self
+            .dispatches
+            .iter()
+            .find(|d| d.id == session.dispatch_id)?;
+        self.environments
+            .iter()
+            .find(|e| e.slug == dispatch.spec.env)
+            .map(|e| e.kind.clone())
+    }
 }
 
 /// The background half of a backed dispatch: provision the worker, then flip
 /// the session to running (or failed) — unless someone cancelled/reaped it
-/// mid-provision, in which case the fresh VM is torn down, not adopted.
-fn provision_worker(ledger: Arc<Mutex<Ledger>>, backend: Arc<ExeDev>, req: ProvisionRequest) {
+/// mid-provision, in which case the fresh worker is torn down, not adopted.
+fn provision_worker(
+    ledger: Arc<Mutex<Ledger>>,
+    backend: Arc<dyn EnvBackend>,
+    req: ProvisionRequest,
+) {
     let uid = req.session_uid.clone();
     {
         let mut l = ledger.lock().unwrap();
@@ -307,17 +334,17 @@ fn provision_worker(ledger: Arc<Mutex<Ledger>>, backend: Arc<ExeDev>, req: Provi
         Ok(p) => {
             let mut l = ledger.lock().unwrap();
             let Ok(session) = l.session_mut(&uid) else {
-                let _ = backend.teardown(&p.vm_name);
+                let _ = backend.teardown(&p.handle);
                 return;
             };
             if session.state != "provisioning" {
-                let _ = backend.teardown(&p.vm_name);
+                let _ = backend.teardown(&p.handle);
                 return;
             }
             session.state = "running".to_string();
             session.started_at = Some(now());
-            session.env_handle = Some(json!({"vmName": p.vm_name, "host": p.host}));
-            session.url = Some(p.url.clone());
+            session.env_handle = Some(p.handle.clone());
+            session.url = p.url.clone();
             let snapshot = session.clone();
             let state_ev = l.push_event(
                 &uid,
@@ -328,7 +355,8 @@ fn provision_worker(ledger: Arc<Mutex<Ledger>>, backend: Arc<ExeDev>, req: Provi
                 &uid,
                 "log",
                 json!({"kind": "log", "payload":
-                    {"line": format!("worker {} up: {}", p.vm_name, p.url)}}),
+                    {"line": format!("worker up: {}{}", p.handle,
+                        p.url.as_deref().map(|u| format!(" ({u})")).unwrap_or_default())}}),
             );
             let _ = l.mirror(vec![
                 session_mutation(&snapshot),
@@ -408,20 +436,22 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             );
         }
 
-        // Will anything actually run this? exe_dev-kind envs have a live
-        // backend (and need a template to copy); everything else queues.
+        // Will anything actually run this? A kind with a registered backend
+        // provisions; everything else queues honestly.
         let env_kind = ledger
             .environments
             .iter()
             .find(|e| e.slug == spec.env)
             .map(|e| e.kind.clone())
             .unwrap_or_default();
-        let backed = env_kind == "exe_dev" && self.backend.is_some();
-        if backed && spec.template.is_none() {
-            bail!(
-                "dispatch to '{}' needs `template`: an already-authed exe.dev VM name to copy",
-                spec.env
-            );
+        let backend = self.backend_for(&env_kind);
+        if let Some(b) = &backend {
+            if b.requires_template() && spec.template.is_none() {
+                bail!(
+                    "dispatch to '{}' needs `template`: an env-side base image to copy",
+                    spec.env
+                );
+            }
         }
 
         let dispatch = DispatchRow {
@@ -444,7 +474,7 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             exit_detail: None,
             reaped_at: None,
         };
-        let accepted = if backed {
+        let accepted = if backend.is_some() {
             "dispatch accepted; provisioning a worker"
         } else {
             "dispatch accepted; queued (no live env backend)"
@@ -454,9 +484,9 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             "log",
             json!({"kind": "log", "payload": {"line": accepted}}),
         );
-        let provision = backed.then(|| ProvisionRequest {
+        let provision = backend.is_some().then(|| ProvisionRequest {
             session_uid: session.uid.clone(),
-            template: dispatch.spec.template.clone().expect("checked above"),
+            template: dispatch.spec.template.clone(),
             repo: dispatch.spec.repo.clone(),
             setup: dispatch.spec.setup.clone(),
             brief: dispatch.spec.brief.clone(),
@@ -471,9 +501,8 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         ledger.mirror(mutations)?;
         drop(ledger);
 
-        if let Some(req) = provision {
+        if let (Some(req), Some(backend)) = (provision, backend) {
             let ledger = Arc::clone(&self.ledger);
-            let backend = Arc::clone(self.backend.as_ref().expect("backed"));
             std::thread::spawn(move || provision_worker(ledger, backend, req));
         }
         Ok(session)
@@ -544,19 +573,24 @@ impl crate::mcp_generated::DisponentMcp for Engine {
     }
 
     fn send(&self, session_uid: String, input: String) -> anyhow::Result<()> {
-        let (state, handle) = {
+        let (state, handle, backend) = {
             let mut ledger = self.ledger.lock().unwrap();
+            let kind = ledger.env_kind_of(&session_uid);
             let session = ledger.session_mut(&session_uid)?;
-            (session.state.clone(), handle_of(session))
+            (
+                session.state.clone(),
+                session.env_handle.clone(),
+                kind.and_then(|k| self.backend_for(&k)),
+            )
         };
         if state != "running" {
             bail!("can't send to session {session_uid}: state is {state}, not running");
         }
-        let (Some(backend), Some((_, host))) = (&self.backend, handle) else {
+        let (Some(backend), Some(handle)) = (backend, handle) else {
             bail!("session {session_uid} has no reachable worker");
         };
-        // The ssh happens outside the ledger lock; the event records after.
-        backend.send(&host, &input)?;
+        // The env round-trip happens outside the ledger lock; the event records after.
+        backend.send(&handle, &input)?;
         let mut ledger = self.ledger.lock().unwrap();
         let event = ledger.push_event(
             &session_uid,
@@ -569,14 +603,16 @@ impl crate::mcp_generated::DisponentMcp for Engine {
 
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session> {
         let mut ledger = self.ledger.lock().unwrap();
+        let kind = ledger.env_kind_of(&session_uid);
         let session = ledger.session_mut(&session_uid)?;
         let state = session.state.clone();
         if TERMINAL.contains(&state.as_str()) {
             bail!("session {session_uid} is already {state}");
         }
-        // Stop the agent but keep the VM for inspection — reap deletes it.
-        if let (Some(backend), Some((_, host))) = (&self.backend, handle_of(session)) {
-            if let Err(e) = backend.stop(&host) {
+        // Stop the agent but keep the environment for inspection — reap deletes it.
+        let backend = kind.and_then(|k| self.backend_for(&k));
+        if let (Some(backend), Some(handle)) = (backend, session.env_handle.clone()) {
+            if let Err(e) = backend.stop(&handle) {
                 let ev = ledger.push_event(
                     &session_uid,
                     "log",
@@ -599,16 +635,18 @@ impl crate::mcp_generated::DisponentMcp for Engine {
 
     fn reap(&self, session_uid: String) -> anyhow::Result<Session> {
         let mut ledger = self.ledger.lock().unwrap();
+        let kind = ledger.env_kind_of(&session_uid);
         let session = ledger.session_mut(&session_uid)?;
         if session.reaped_at.is_some() {
             bail!("session {session_uid} is already reaped");
         }
         // Reap = resources torn down THEN the row archived — a teardown failure
         // errors out with the board unchanged, so reap can be retried.
-        if let (Some(backend), Some((vm_name, _))) = (&self.backend, handle_of(session)) {
+        let backend = kind.and_then(|k| self.backend_for(&k));
+        if let (Some(backend), Some(handle)) = (backend, session.env_handle.clone()) {
             backend
-                .teardown(&vm_name)
-                .map_err(|e| anyhow!("teardown {vm_name}: {e} (reap again to retry)"))?;
+                .teardown(&handle)
+                .map_err(|e| anyhow!("teardown {handle}: {e} (reap again to retry)"))?;
         }
         // Reap on a live session cancels it first — one call always clears the board.
         let session = ledger.session_mut(&session_uid)?;
@@ -625,10 +663,12 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         Ok(snapshot)
     }
 
-    /// Environments are the source of truth; the ledger is the cache. Confirm
-    /// sessions whose workers still exist, mark the ones whose workers vanished
-    /// `lost`, adopt tagged workers the ledger has never heard of (a previous
-    /// disponent's), and tear down workers backing already-reaped sessions.
+    /// Environments are the source of truth; the ledger is the cache. Per
+    /// backend: confirm sessions whose workers still exist, mark the ones
+    /// whose workers vanished `lost`, adopt discovered workers the ledger has
+    /// never heard of (a previous disponent's), and tear down workers backing
+    /// already-reaped sessions. A session whose kind has no backend here is
+    /// left alone — we can't see its environment, so we don't judge it.
     fn reconcile(&self) -> anyhow::Result<ReconcileReport> {
         let mut report = ReconcileReport {
             adopted: 0,
@@ -636,18 +676,21 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             lost: 0,
             torn_down: 0,
         };
-        let Some(backend) = &self.backend else {
-            return Ok(report);
-        };
-        let vms = backend.list()?;
-        let live_names: std::collections::HashSet<&str> =
-            vms.iter().map(|v| v.vm_name.as_str()).collect();
+        // kind → (uid → discovered handle), surveyed outside the ledger lock
+        let mut discovered: std::collections::HashMap<
+            &str,
+            std::collections::HashMap<String, serde_json::Value>,
+        > = std::collections::HashMap::new();
+        for b in &self.backends {
+            discovered.insert(b.kind(), b.survey()?.into_iter().collect());
+        }
 
         struct Row {
             uid: String,
             state: String,
             reaped: bool,
-            handle: Option<(String, String)>,
+            kind: Option<String>,
+            handle: Option<serde_json::Value>,
         }
         let mut ledger = self.ledger.lock().unwrap();
         let rows: Vec<Row> = ledger
@@ -657,78 +700,87 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                 uid: s.uid.clone(),
                 state: s.state.clone(),
                 reaped: s.reaped_at.is_some(),
-                handle: handle_of(s),
+                kind: ledger.env_kind_of(&s.uid),
+                handle: s.env_handle.clone(),
             })
             .collect();
         let mut mutations = Vec::new();
-        for Row {
-            uid,
-            state,
-            reaped,
-            handle,
-        } in &rows
-        {
-            let Some((vm_name, _)) = handle else { continue };
-            let exists = live_names.contains(vm_name.as_str());
-            if *reaped {
-                if exists && backend.teardown(vm_name).is_ok() {
-                    report.torn_down += 1;
+        for row in &rows {
+            let (Some(handle), Some(seen)) = (
+                &row.handle,
+                row.kind.as_deref().and_then(|k| discovered.get(k)),
+            ) else {
+                continue;
+            };
+            let exists = seen.contains_key(&row.uid);
+            if row.reaped {
+                if exists {
+                    let backend = self.backend_for(row.kind.as_deref().unwrap()).unwrap();
+                    if backend.teardown(handle).is_ok() {
+                        report.torn_down += 1;
+                    }
                 }
             } else if exists {
                 report.confirmed += 1;
-            } else if !TERMINAL.contains(&state.as_str()) {
-                let (s, e) = ledger.transition(uid, "lost")?;
+            } else if !TERMINAL.contains(&row.state.as_str()) {
+                let (s, e) = ledger.transition(&row.uid, "lost")?;
                 mutations.push(session_mutation(&s));
                 mutations.push(event_mutation(&e));
                 report.lost += 1;
             }
         }
 
-        // Adoption: a tagged worker whose session the ledger doesn't know —
+        // Adoption: a discovered worker whose session the ledger doesn't know —
         // some earlier disponent dispatched it; it's ours now.
-        for vm in &vms {
-            let Some(session_uid) = backend::session_of(vm) else {
+        for (kind, found) in &discovered {
+            let Some(env_slug) = ledger
+                .environments
+                .iter()
+                .find(|e| e.kind == *kind)
+                .map(|e| e.slug.clone())
+            else {
                 continue;
             };
-            if ledger.sessions.iter().any(|s| s.uid == session_uid) {
-                continue;
+            for (session_uid, handle) in found {
+                if ledger.sessions.iter().any(|s| &s.uid == session_uid) {
+                    continue;
+                }
+                let dispatch = DispatchRow {
+                    id: Uuid::now_v7().to_string(),
+                    created_at: now(),
+                    spec: serde_json::from_value(json!({
+                        "brief": format!("[adopted] worker {handle} found in {env_slug}"),
+                        "env": env_slug,
+                    }))?,
+                    agent: "claude-code".to_string(),
+                    model: None,
+                };
+                let session = Session {
+                    uid: session_uid.clone(),
+                    dispatch_id: dispatch.id.clone(),
+                    state: "running".to_string(),
+                    env_handle: Some(handle.clone()),
+                    url: None,
+                    resumed_from: None,
+                    started_at: None,
+                    ended_at: None,
+                    exit_reason: None,
+                    exit_detail: None,
+                    reaped_at: None,
+                };
+                let event = ledger.push_event(
+                    session_uid,
+                    "log",
+                    json!({"kind": "log", "payload":
+                        {"line": format!("adopted from {env_slug} ({handle})")}}),
+                );
+                mutations.push(dispatch.mutation());
+                mutations.push(session_mutation(&session));
+                mutations.push(event_mutation(&event));
+                ledger.dispatches.push(dispatch);
+                ledger.sessions.push(session);
+                report.adopted += 1;
             }
-            let host = backend.host(&vm.vm_name);
-            let dispatch = DispatchRow {
-                id: Uuid::now_v7().to_string(),
-                created_at: now(),
-                spec: serde_json::from_value(json!({
-                    "brief": format!("[adopted] worker {} found on exe.dev", vm.vm_name),
-                    "env": "exe-dev",
-                }))?,
-                agent: "claude-code".to_string(),
-                model: None,
-            };
-            let session = Session {
-                uid: session_uid.to_string(),
-                dispatch_id: dispatch.id.clone(),
-                state: "running".to_string(),
-                env_handle: Some(json!({"vmName": vm.vm_name, "host": host})),
-                url: None,
-                resumed_from: None,
-                started_at: None,
-                ended_at: None,
-                exit_reason: None,
-                exit_detail: None,
-                reaped_at: None,
-            };
-            let event = ledger.push_event(
-                session_uid,
-                "log",
-                json!({"kind": "log", "payload":
-                    {"line": format!("adopted from exe.dev ({})", vm.vm_name)}}),
-            );
-            mutations.push(dispatch.mutation());
-            mutations.push(session_mutation(&session));
-            mutations.push(event_mutation(&event));
-            ledger.dispatches.push(dispatch);
-            ledger.sessions.push(session);
-            report.adopted += 1;
         }
         ledger.mirror(mutations)?;
         Ok(report)

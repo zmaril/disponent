@@ -13,7 +13,8 @@ fn sqlite_mirror_tracks_the_ledger() {
     let path = tmpfile();
     let _ = std::fs::remove_file(&path);
 
-    let engine = Engine::open(Some(path.to_str().unwrap())).unwrap();
+    // no backends: the row set below stays deterministic (nothing provisions)
+    let engine = Engine::open_with(Some(path.to_str().unwrap()), vec![]).unwrap();
     // dispatch to `local` — unbacked, so the row set is deterministic (no
     // background provisioner racing the assertions below)
     let spec: DispatchSpec = serde_json::from_value(serde_json::json!({
