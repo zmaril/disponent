@@ -1,0 +1,21 @@
+[package]
+name = "disponent-python"
+description = "Python (PyO3) binding: the disponent engine, in-process in Python."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# The compiled extension is `disponent._disponent`; the pure-Python
+# `python/disponent/` package (mixed maturin layout) re-exports it.
+name = "_disponent"
+crate-type = ["cdylib"]
+
+[dependencies]
+# multiple-pymethods lets the @manual `wait()` in lib.rs extend the generated
+# `Disponent` class with a second #[pymethods] block.
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39", "multiple-pymethods"] }
+disponent-core = { path = "../disponent-core" }
+anyhow = { workspace = true }
+serde_json = { workspace = true }

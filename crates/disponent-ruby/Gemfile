@@ -1,0 +1,7 @@
+# The ruby binding's build/test deps, declared once — `bundle install` locally
+# and in CI (Gemfile.lock pins the versions). The gem itself has no runtime
+# deps: the engine is the compiled extension.
+source "https://rubygems.org"
+
+gem "rb_sys", "~> 0.9"
+gem "minitest", "~> 5.25"

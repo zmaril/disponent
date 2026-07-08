@@ -15,6 +15,6 @@ uuid = { workspace = true }
 # The schema tool doubles as the runtime data plane: SqlCodec compiles typed
 # mutations into ordered {sql, params} plans (the sink + driverPlan). Pinned by
 # SHA, same discipline as the codegen pin in scripts/gen.sh — bump deliberately.
-fluessig = { git = "https://github.com/zmaril/fluessig", rev = "15a2e1deaf122ebfdb6b6d392f59c111729397c1" }
+fluessig = { git = "https://github.com/zmaril/fluessig", rev = "0ee9d4672987d7c8a8762993d13860af7e25973e" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tiny_http = { workspace = true }
