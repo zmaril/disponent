@@ -105,7 +105,7 @@ fn supervisor_walks_the_whole_flow() {
     let mut server = Server::start("supervisor");
 
     let names = server.tool_names();
-    assert_eq!(names.len(), 14, "the full generated surface: {names:?}");
+    assert_eq!(names.len(), 15, "the full generated surface: {names:?}");
     assert!(names.contains(&"disponent_dispatch".to_string()));
     assert!(names.contains(&"disponent_workspace_link".to_string()));
 
@@ -134,6 +134,21 @@ fn supervisor_walks_the_whole_flow() {
         2,
         "one default per environment (local, exe-dev)"
     );
+
+    // per-env capabilities: one row per (env, capability) the catalog advertises
+    let (caps, err) = server.call("disponent_capabilities", json!({}));
+    assert!(!err);
+    let caprows = caps.as_array().unwrap();
+    assert!(caprows
+        .iter()
+        .any(|c| c["envSlug"] == "local" && c["capability"] == "dispatch"));
+    // exe-dev advertises VM isolation + templates; local does not
+    assert!(caprows
+        .iter()
+        .any(|c| c["envSlug"] == "exe-dev" && c["capability"] == "isolation_vm"));
+    assert!(!caprows
+        .iter()
+        .any(|c| c["envSlug"] == "local" && c["capability"] == "isolation_vm"));
 
     let (session, err) = server.call(
         "disponent_dispatch",
@@ -234,6 +249,7 @@ fn worker_sees_only_the_readonly_surface() {
         [
             "disponent_environments",
             "disponent_offerings",
+            "disponent_capabilities",
             "disponent_session",
             "disponent_sessions",
             "disponent_workspace_link",

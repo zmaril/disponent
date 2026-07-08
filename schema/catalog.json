@@ -1746,6 +1746,38 @@
           "nullable": false
         }
       ]
+    },
+    {
+      "name": "EnvCapability",
+      "doc": "What an environment can do: one row per (env, capability) the catalog\nadvertises. Mirrors the env_capabilities edge as a flat, returnable value\nstruct (the closed CapabilityKind vocabulary, plus open detail).",
+      "fields": [
+        {
+          "name": "envSlug",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "capability",
+          "type": {
+            "k": "enum",
+            "name": "CapabilityKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "detail",
+          "type": {
+            "k": "scalar",
+            "name": "Json",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "Env-specific texture (poll granularity, supported template kinds, …), when known."
+        }
+      ]
     }
   ]
 }

@@ -24,8 +24,8 @@ use crate::backend::{EnvBackend, ExeDev, ProvisionRequest};
 use crate::catalog::{self, upsert};
 use crate::local::LocalTmux;
 use crate::mcp_generated::{
-    DispatchSpec, DriverPlanOptions, Environment, Event, EventOptions, Offering, ReconcileReport,
-    Session, SessionFilter, Statement, WorkspaceLink,
+    DispatchSpec, DriverPlanOptions, EnvCapability, Environment, Event, EventOptions, Offering,
+    ReconcileReport, Session, SessionFilter, Statement, WorkspaceLink,
 };
 use crate::observe::{self, Observation};
 use crate::schema_gen::{TableSchema, DUCKDB_TABLES, PG_TABLES, SQLITE_TABLES};
@@ -617,6 +617,23 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                 agent_name: o.agent.to_string(),
                 model_id: o.model.to_string(),
                 is_default: o.is_default,
+            })
+            .collect())
+    }
+
+    fn capabilities(&self) -> anyhow::Result<Vec<EnvCapability>> {
+        // Straight off the shipped catalog (the same static per-env capability
+        // data seeded into the env_capabilities edge); one row per (env,
+        // capability) the backend actually advertises — no ledger state, no lock.
+        // detail is None: the catalog carries no per-capability texture today.
+        Ok(catalog::CAPABILITIES
+            .iter()
+            .flat_map(|ec| {
+                ec.capabilities.iter().map(|cap| EnvCapability {
+                    env_slug: ec.env.to_string(),
+                    capability: cap.to_string(),
+                    detail: None,
+                })
             })
             .collect())
     }

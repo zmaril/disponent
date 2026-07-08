@@ -273,6 +273,17 @@ pub struct Statement {
     pub params: String,
 }
 
+/// What an environment can do: one row per (env, capability) the catalog
+/// advertises. Mirrors the env_capabilities edge as a flat, returnable value
+/// struct (the closed CapabilityKind vocabulary, plus open detail).
+#[napi(object)]
+#[derive(Clone)]
+pub struct EnvCapability {
+    pub env_slug: String,
+    pub capability: CapabilityKind,
+    pub detail: Option<String>,
+}
+
 /// Somewhere work can run. Config supplies these; the shipped catalog fills offerings + capabilities.
 #[napi(object)]
 #[derive(Clone)]
@@ -330,6 +341,7 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn environments(&self) -> anyhow::Result<Vec<Environment>>;
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>>;
     fn offerings(&self) -> anyhow::Result<Vec<Offering>>;
+    fn capabilities(&self) -> anyhow::Result<Vec<EnvCapability>>;
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
@@ -451,6 +463,20 @@ impl Task for OfferingsTask {
     type JsValue = Vec<Offering>;
     fn compute(&mut self) -> Result<Self::Output> {
         self.core.offerings().map_err(err)
+    }
+    fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
+        Ok(o)
+    }
+}
+
+pub struct CapabilitiesTask {
+    core: Arc<crate::core_impl::DisponentImpl>,
+}
+impl Task for CapabilitiesTask {
+    type Output = Vec<EnvCapability>;
+    type JsValue = Vec<EnvCapability>;
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.core.capabilities().map_err(err)
     }
     fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
         Ok(o)
@@ -632,6 +658,15 @@ impl Disponent {
     #[napi(ts_return_type = "Promise<Offering[]>")]
     pub fn offerings(&self) -> AsyncTask<OfferingsTask> {
         AsyncTask::new(OfferingsTask {
+            core: self.core.clone(),
+        })
+    }
+    /// Per-env capabilities: what each environment can do, one row per
+    /// (env, capability) the catalog advertises. Lets a consumer grade backends
+    /// by what they support without reaching for the raw driver plan.
+    #[napi(ts_return_type = "Promise<EnvCapability[]>")]
+    pub fn capabilities(&self) -> AsyncTask<CapabilitiesTask> {
+        AsyncTask::new(CapabilitiesTask {
             core: self.core.clone(),
         })
     }

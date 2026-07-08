@@ -394,6 +394,17 @@ model Statement {
   params: Json;
 }
 
+/** What an environment can do: one row per (env, capability) the catalog
+ * advertises. Mirrors the env_capabilities edge as a flat, returnable value
+ * struct (the closed CapabilityKind vocabulary, plus open detail). */
+model EnvCapability {
+  envSlug: string;
+  capability: CapabilityKind;
+
+  /** Env-specific texture (poll granularity, supported template kinds, …), when known. */
+  detail?: Json;
+}
+
 // ── the op surface ──
 interface Disponent {
   @ctor open(options?: OpenOptions): void;
@@ -406,6 +417,11 @@ interface Disponent {
    * environment. Lets a consumer enumerate what can run where without reaching
    * for the raw driver plan. */
   @readonly offerings(): Offering[];
+
+  /** Per-env capabilities: what each environment can do, one row per
+   * (env, capability) the catalog advertises. Lets a consumer grade backends
+   * by what they support without reaching for the raw driver plan. */
+  @readonly capabilities(): EnvCapability[];
 
   dispatch(spec: DispatchSpec): Session;
   @readonly session(uid: SessionUid): Session | null;
