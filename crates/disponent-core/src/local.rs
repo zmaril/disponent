@@ -106,6 +106,18 @@ fn is_gh_slug(repo: &str) -> bool {
         && !std::path::Path::new(repo).exists()
 }
 
+/// If `repo` names a local git repository (a `/`, `.` or `~` path, or an
+/// existing dir, that holds a `.git`), its canonical path — else None. This is
+/// the only shape `git worktree add` can apply to; a remote slug/URL can't.
+fn local_git_repo(repo: &str) -> Option<PathBuf> {
+    let expanded = match repo.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var("HOME").ok()?).join(rest),
+        None => PathBuf::from(repo),
+    };
+    let canon = std::fs::canonicalize(&expanded).ok()?;
+    canon.join(".git").exists().then_some(canon)
+}
+
 impl EnvBackend for LocalTmux {
     fn kind(&self) -> &'static str {
         "local"
@@ -116,7 +128,7 @@ impl EnvBackend for LocalTmux {
     }
 
     fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<Provision> {
-        let handle = self.handle(&req.session_uid);
+        let mut handle = self.handle(&req.session_uid);
         if self.dry_run {
             return Ok(Provision { handle, url: None });
         }
@@ -139,15 +151,48 @@ impl EnvBackend for LocalTmux {
             Ok(())
         };
 
-        // clone → setup → agent, the same order as the remote bootstrap
+        // clone (or worktree) → setup → agent, the same order as the remote
+        // bootstrap. `isolation: "worktree"` on a LOCAL git repo adds a
+        // worktree off it instead of cloning; a fresh branch per session
+        // (`disponent/<uid>`, unique because uids are UUIDv7) keeps it isolated
+        // and removable on reap. A worktree requested against a remote repo
+        // can't apply — a fresh clone is still an isolated dir, so fall through
+        // honestly rather than pretend it's a worktree.
+        let want_worktree = req.isolation.as_deref() == Some("worktree");
         if let Some(repo) = req.repo.as_deref().filter(|r| !r.is_empty()) {
-            let clone = if is_gh_slug(repo) {
-                format!("gh repo clone {} task", shq(repo))
-            } else {
-                format!("git clone {} task", shq(repo))
-            };
-            std::fs::remove_dir_all(&task).ok();
-            sh(&clone, &work, "clone")?;
+            match want_worktree.then(|| local_git_repo(repo)).flatten() {
+                Some(parent) => {
+                    // git worktree add needs the target to not already exist.
+                    std::fs::remove_dir_all(&task).ok();
+                    // A named git_ref selects the worktree's branch with `-B`
+                    // (create-or-reset off HEAD, so re-dispatching the same ref
+                    // doesn't fail on an existing branch); no ref → a fresh,
+                    // uid-unique `disponent/<uid>` branch via `-b`.
+                    let branch_flag = match req.git_ref.as_deref().filter(|r| !r.is_empty()) {
+                        Some(git_ref) => format!("-B {}", shq(git_ref)),
+                        None => format!("-b {}", shq(&format!("disponent/{}", req.session_uid))),
+                    };
+                    let cmd = format!(
+                        "git -C {} worktree add {} {}",
+                        shq(&parent.display().to_string()),
+                        branch_flag,
+                        shq(&task.display().to_string()),
+                    );
+                    sh(&cmd, &work, "worktree")?;
+                    // Record the parent repo so reap can deregister the worktree
+                    // (a bare rm -rf would leave a dangling registration).
+                    handle["worktreeRepo"] = json!(parent.display().to_string());
+                }
+                None => {
+                    let clone = if is_gh_slug(repo) {
+                        format!("gh repo clone {} task", shq(repo))
+                    } else {
+                        format!("git clone {} task", shq(repo))
+                    };
+                    std::fs::remove_dir_all(&task).ok();
+                    sh(&clone, &work, "clone")?;
+                }
+            }
         }
         if let Some(setup) = req.setup.as_deref().filter(|s| !s.is_empty()) {
             sh(setup, &task, "setup")?;
@@ -222,6 +267,20 @@ impl EnvBackend for LocalTmux {
             // outside the root.
             let dir = PathBuf::from(dir);
             if dir.starts_with(&self.root) && dir != self.root {
+                // A worktree session's task dir is registered in the parent
+                // repo — deregister it there first, so a plain rm doesn't leave
+                // a dangling worktree behind. (The branch stays: it holds the
+                // agent's committed work for the operator to keep or discard.)
+                if let Some(repo) = handle["worktreeRepo"].as_str() {
+                    let task = dir.join("task").display().to_string();
+                    let git = |args: &[&str]| {
+                        let mut argv = vec!["git".to_string(), "-C".to_string(), repo.to_string()];
+                        argv.extend(args.iter().map(|s| s.to_string()));
+                        let _ = run_argv(&argv, None);
+                    };
+                    git(&["worktree", "remove", "--force", &task]);
+                    git(&["worktree", "prune"]);
+                }
                 std::fs::remove_dir_all(&dir).ok();
             }
         }

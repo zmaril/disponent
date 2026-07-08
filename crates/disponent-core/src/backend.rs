@@ -21,6 +21,13 @@ pub struct ProvisionRequest {
     pub template: Option<String>,
     /// `owner/repo` (gh-clonable) — empty means pure-prompt work, no clone.
     pub repo: Option<String>,
+    /// The dispatch's requested isolation ("worktree"/"none"/…); the local
+    /// backend honors "worktree" for local-path repos, others fall through.
+    pub isolation: Option<String>,
+    /// The branch/ref to check out. For worktree isolation it names the
+    /// worktree's branch (create-or-reset via `-B`); None → a fresh
+    /// `disponent/<uid>` branch.
+    pub git_ref: Option<String>,
     /// Per-dispatch setup, run after the template's baseline and the clone.
     pub setup: Option<String>,
     pub brief: String,
@@ -483,6 +490,8 @@ mod tests {
             session_uid: "0198-abc-def0-123456789abc".into(),
             template: Some("claude-base".into()),
             repo: repo.map(String::from),
+            isolation: None,
+            git_ref: None,
             setup: setup.map(String::from),
             brief: "do the thing".into(),
             otel_endpoint: None,
