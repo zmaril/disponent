@@ -69,12 +69,14 @@ fn attr_map(attrs: Option<&Vec<Value>>) -> BTreeMap<String, Value> {
     out
 }
 
-/// claude_code.* event → (kind, payload envelope). Pure; unit-tested.
+/// claude_code event → (kind, payload envelope). Pure; unit-tested. Live
+/// exports carry bare names (`api_request`); the docs show them prefixed
+/// (`claude_code.api_request`) — accept both.
 pub fn map_event(name: &str, attrs: &BTreeMap<String, Value>) -> (String, Value) {
     let s = |k: &str| attrs.get(k).and_then(Value::as_str).unwrap_or_default();
     let n = |k: &str| attrs.get(k).and_then(Value::as_i64);
-    match name {
-        "claude_code.user_prompt" => {
+    match name.strip_prefix("claude_code.").unwrap_or(name) {
+        "user_prompt" => {
             let text = attrs
                 .get("prompt")
                 .and_then(Value::as_str)
@@ -85,7 +87,7 @@ pub fn map_event(name: &str, attrs: &BTreeMap<String, Value>) -> (String, Value)
                 json!({"kind": "message", "payload": {"role": "user", "text": text}}),
             )
         }
-        "claude_code.assistant_response" => {
+        "assistant_response" => {
             let text = attrs
                 .get("response")
                 .and_then(Value::as_str)
@@ -98,7 +100,7 @@ pub fn map_event(name: &str, attrs: &BTreeMap<String, Value>) -> (String, Value)
                 json!({"kind": "message", "payload": {"role": "assistant", "text": text}}),
             )
         }
-        "claude_code.tool_result" => (
+        "tool_result" => (
             "tool_result".into(),
             json!({"kind": "toolResult", "payload": {
                 "tool": s("tool_name"),
@@ -110,14 +112,14 @@ pub fn map_event(name: &str, attrs: &BTreeMap<String, Value>) -> (String, Value)
                     else { format!(" ({})", s("error_type")) }),
             }}),
         ),
-        "claude_code.tool_decision" => (
+        "tool_decision" => (
             "tool_call".into(),
             json!({"kind": "toolCall", "payload": {
                 "tool": s("tool_name"),
                 "input": {"decision": s("decision"), "source": s("source")},
             }}),
         ),
-        "claude_code.api_request" => (
+        "api_request" => (
             "usage".into(),
             json!({"kind": "usage", "payload": {
                 "modelId": s("model"),
@@ -283,10 +285,8 @@ mod tests {
         assert_eq!(events[1].payload["payload"]["tool"], "Bash");
         assert_eq!(events[1].payload["payload"]["ok"], true);
         assert_eq!(events[2].kind, "raw", "unmapped events survive as raw");
-        assert_eq!(
-            events[2].payload["payload"]["source"],
-            "claude_code.compaction"
-        );
+        // the raw source is the normalized (bare) name, like live exports use
+        assert_eq!(events[2].payload["payload"]["source"], "compaction");
     }
 
     #[test]
