@@ -3,11 +3,13 @@
 //! handle + url; send records the supervisor message; cancel stops the agent
 //! but keeps the VM; reap tears down; reconcile marks vanished workers lost.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use disponent_core::backend::ExeDev;
 use disponent_core::mcp_generated::{DispatchSpec, DisponentMcp, Session};
 use disponent_core::Engine;
+
+mod common;
 
 fn spec() -> DispatchSpec {
     serde_json::from_value(serde_json::json!({
@@ -19,21 +21,8 @@ fn spec() -> DispatchSpec {
     .unwrap()
 }
 
-/// Poll until the background provisioner settles the session, or time out.
 fn wait_for(engine: &Engine, uid: &str, state: &str) -> Session {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let s = engine.session(uid.to_string()).unwrap().unwrap();
-        if s.state == state {
-            return s;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "session stuck in {} waiting for {state}",
-            s.state
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    common::wait_for(engine, uid, state, Duration::from_secs(5))
 }
 
 #[test]
