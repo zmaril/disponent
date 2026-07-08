@@ -161,11 +161,14 @@ fn worktree_isolation_adds_and_removes_a_worktree() {
         task.join(".git").is_file(),
         "worktree .git is a pointer file"
     );
-    let list = std::process::Command::new("git")
-        .args(["-C", &src.display().to_string(), "worktree", "list"])
-        .output()
-        .unwrap();
-    let list = String::from_utf8_lossy(&list.stdout);
+    let worktree_list = || {
+        let out = std::process::Command::new("git")
+            .args(["-C", &src.display().to_string(), "worktree", "list"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let list = worktree_list();
     assert!(
         list.contains(&task.display().to_string()),
         "parent lists the worktree:\n{list}"
@@ -182,11 +185,7 @@ fn worktree_isolation_adds_and_removes_a_worktree() {
     // Reap deregisters the worktree in the parent AND removes the dir.
     engine.reap(session.uid.clone()).unwrap();
     assert!(!work.exists(), "work dir removed by reap");
-    let list = std::process::Command::new("git")
-        .args(["-C", &src.display().to_string(), "worktree", "list"])
-        .output()
-        .unwrap();
-    let list = String::from_utf8_lossy(&list.stdout);
+    let list = worktree_list();
     assert!(
         !list.contains(&task.display().to_string()),
         "worktree deregistered from parent (no dangling registration):\n{list}"
