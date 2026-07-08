@@ -154,12 +154,18 @@ impl EnvBackend for LocalTmux {
         }
 
         // The runner keeps the brief out of the tmux command string (it's
-        // `cat`-ed at launch), mirroring the remote convention.
+        // `cat`-ed at launch), mirroring the remote convention. Telemetry
+        // exports live in the runner so every session gets its own wiring.
+        let otel = req
+            .otel_endpoint
+            .as_deref()
+            .map(|e| format!("{}\n", crate::otel::worker_env(e, &req.session_uid)))
+            .unwrap_or_default();
         let runner = work.join("run.sh");
         std::fs::write(
             &runner,
             format!(
-                "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")/task\"\n{} \"$(cat ../brief.md)\" || true\nexec bash\n",
+                "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")/task\"\n{otel}{} \"$(cat ../brief.md)\" || true\nexec bash\n",
                 self.agent_cmd
             ),
         )?;
@@ -220,6 +226,10 @@ impl EnvBackend for LocalTmux {
             }
         }
         Ok(())
+    }
+
+    fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String> {
+        LocalTmux::capture(self, handle)
     }
 
     fn survey(&self) -> anyhow::Result<Vec<(String, serde_json::Value)>> {

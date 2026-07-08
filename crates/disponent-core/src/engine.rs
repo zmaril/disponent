@@ -8,11 +8,14 @@
 //! backend's survey. Ops a version can't do yet (resume) say so instead of
 //! pretending.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 use chrono::{SecondsFormat, Utc};
 use fluessig::data::{Mutation, Transaction};
+use fluessig::observe::{Event as ObsEvent, ObserverPool, Poll};
 use fluessig::sql::Dialect;
 use serde_json::json;
 use uuid::Uuid;
@@ -24,6 +27,7 @@ use crate::mcp_generated::{
     DispatchSpec, DriverPlanOptions, Environment, Event, EventOptions, ReconcileReport, Session,
     SessionFilter, Statement,
 };
+use crate::observe::{self, Observation};
 use crate::schema_gen::{TableSchema, DUCKDB_TABLES, PG_TABLES, SQLITE_TABLES};
 use crate::sink::Sink;
 
@@ -37,6 +41,15 @@ pub struct Engine {
     ledger: Arc<Mutex<Ledger>>,
     /// One backend per environment kind; a kind with no backend queues honestly.
     backends: Vec<Arc<dyn EnvBackend>>,
+    /// Terminal observers (one thread per watched session) funneling into the
+    /// collector, which folds observations into the ledger.
+    observers: Arc<ObserverPool<Observation>>,
+    observe_interval: Duration,
+    collector_stop: Arc<AtomicBool>,
+    /// OTLP receiver endpoints workers get wired to: one reachable from local
+    /// workers, one from remote ones. None = that tier is off.
+    otel_local: Option<String>,
+    otel_public: Option<String>,
 }
 
 #[derive(Default)]
@@ -73,31 +86,42 @@ impl Default for Engine {
 impl Engine {
     /// Memory-only, no backends (tests, throwaways). `open` is the front door.
     pub fn new() -> Self {
-        Engine {
-            ledger: Arc::new(Mutex::new(Ledger {
+        Engine::assemble(
+            Ledger {
                 environments: catalog::environments(),
                 ..Ledger::default()
-            })),
-            backends: Vec::new(),
-        }
+            },
+            Vec::new(),
+        )
     }
 
     /// An engine over the shipped catalog with the real backends (exe.dev +
     /// local tmux). `sink`: `None` = the managed SQLite file (~/.disponent),
-    /// `"none"` = memory only, anything else = a SQLite path.
+    /// `"none"` = memory only, anything else = a SQLite path. The OTel
+    /// receiver starts when `DISPONENT_OTEL_PORT` is set (remote workers
+    /// reach it via `DISPONENT_OTEL_PUBLIC_URL`, when that's reachable).
     pub fn open(sink: Option<&str>) -> anyhow::Result<Self> {
-        Engine::open_with(
+        let mut engine = Engine::open_with(
             sink,
             vec![
                 Arc::new(ExeDev::from_env()),
                 Arc::new(LocalTmux::from_env()),
             ],
-        )
+        )?;
+        if let Ok(port) = std::env::var("DISPONENT_OTEL_PORT") {
+            let port: u16 = port
+                .parse()
+                .map_err(|_| anyhow!("DISPONENT_OTEL_PORT: not a port: {port}"))?;
+            engine.start_otel(port)?;
+            engine.otel_public = std::env::var("DISPONENT_OTEL_PUBLIC_URL").ok();
+        }
+        Ok(engine)
     }
 
     /// The composable front door: any sink spec, any backend set. A sink that
     /// remembers earlier runs rehydrates the ledger — restarts serve the full
-    /// board, not just what reconcile can re-discover live.
+    /// board, not just what reconcile can re-discover live — and running
+    /// sessions get their terminal observers back.
     pub fn open_with(
         sink: Option<&str>,
         backends: Vec<Arc<dyn EnvBackend>>,
@@ -131,22 +155,180 @@ impl Engine {
             ledger.events = restored.events;
         }
         ledger.sink = sink;
-        Ok(Engine {
-            ledger: Arc::new(Mutex::new(ledger)),
-            backends,
-        })
+        let engine = Engine::assemble(ledger, backends);
+        // Rehydrated running sessions get watched again.
+        let watchable: Vec<(String, serde_json::Value, Option<String>)> = {
+            let ledger = engine.ledger.lock().unwrap();
+            ledger
+                .sessions
+                .iter()
+                .filter(|s| s.state == "running" && s.reaped_at.is_none())
+                .filter_map(|s| {
+                    s.env_handle
+                        .clone()
+                        .map(|h| (s.uid.clone(), h, ledger.env_kind_of(&s.uid)))
+                })
+                .collect()
+        };
+        for (uid, handle, kind) in watchable {
+            if let Some(backend) = kind.and_then(|k| engine.backend_for(&k)) {
+                engine.watch(&uid, backend, handle);
+            }
+        }
+        Ok(engine)
     }
 
     /// Memory-only over one injected backend (the dry-run tests' front door).
     pub fn with_backend<B: EnvBackend + 'static>(backend: B) -> Self {
-        Engine {
-            backends: vec![Arc::new(backend)],
-            ..Engine::new()
+        Engine::assemble(
+            Ledger {
+                environments: catalog::environments(),
+                ..Ledger::default()
+            },
+            vec![Arc::new(backend)],
+        )
+    }
+
+    /// The common tail of every constructor: the observer pool and the
+    /// collector thread that folds its drain into the ledger.
+    fn assemble(ledger: Ledger, backends: Vec<Arc<dyn EnvBackend>>) -> Self {
+        let ledger = Arc::new(Mutex::new(ledger));
+        let observers = Arc::new(ObserverPool::new(1024));
+        let collector_stop = Arc::new(AtomicBool::new(false));
+        {
+            let ledger = Arc::clone(&ledger);
+            let observers = Arc::clone(&observers);
+            let stop = Arc::clone(&collector_stop);
+            std::thread::spawn(move || collect(ledger, observers, stop));
         }
+        let observe_interval = Duration::from_millis(
+            std::env::var("DISPONENT_OBSERVE_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5000),
+        );
+        Engine {
+            ledger,
+            backends,
+            observers,
+            observe_interval,
+            collector_stop,
+            otel_local: None,
+            otel_public: None,
+        }
+    }
+
+    /// Start the OTLP/http-json receiver on `port` (0 = ephemeral); local
+    /// workers get wired to the bound endpoint. Returns the bound port.
+    pub fn start_otel(&mut self, port: u16) -> anyhow::Result<u16> {
+        let ledger = Arc::clone(&self.ledger);
+        let bound = crate::otel::serve(port, move |e| {
+            let mut l = ledger.lock().unwrap();
+            // Only sessions we know get a timeline; a stale worker's late
+            // telemetry after reap is dropped, not resurrected.
+            if l.sessions.iter().any(|s| s.uid == e.session_uid) {
+                let ev = l.push_event_graded(&e.session_uid, &e.kind, &e.fidelity, e.payload);
+                let _ = l.mirror(vec![event_mutation(&ev)]);
+            }
+        })?;
+        self.otel_local = Some(format!("http://127.0.0.1:{bound}"));
+        Ok(bound)
+    }
+
+    /// The OTLP endpoint workers of this backend kind should export to.
+    fn otel_endpoint_for(&self, kind: &str) -> Option<String> {
+        if kind == "local" {
+            self.otel_local.clone()
+        } else {
+            self.otel_public.clone()
+        }
+    }
+
+    /// Watch a running session's terminal: capture on an interval, emit what
+    /// changed as scraped raw events. Idempotent per session (pool-enforced).
+    fn watch(&self, uid: &str, backend: Arc<dyn EnvBackend>, handle: serde_json::Value) {
+        watch_session(&self.observers, self.observe_interval, backend, uid, handle);
     }
 
     fn backend_for(&self, kind: &str) -> Option<Arc<dyn EnvBackend>> {
         self.backends.iter().find(|b| b.kind() == kind).cloned()
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.collector_stop.store(true, Ordering::Relaxed);
+        self.observers.shutdown();
+    }
+}
+
+/// One session's terminal watcher joins the pool (the provisioner and
+/// reconcile-adoption call this off the Engine).
+fn watch_session(
+    observers: &ObserverPool<Observation>,
+    interval: Duration,
+    backend: Arc<dyn EnvBackend>,
+    uid: &str,
+    handle: serde_json::Value,
+) {
+    let mut last = String::new();
+    observers.spawn(uid.to_string(), interval, move || {
+        let pane = backend.capture(&handle).map_err(|e| e.to_string())?;
+        let delta = observe::terminal_delta(&last, &pane);
+        last = pane;
+        Ok(Poll::Items(
+            delta
+                .map(observe::terminal_observation)
+                .into_iter()
+                .collect(),
+        ))
+    });
+}
+
+/// The collector: fold drained observations into the ledger until stopped.
+/// Observer failures become log events — a watcher dying is a fact about the
+/// session, not a silent gap.
+fn collect(
+    ledger: Arc<Mutex<Ledger>>,
+    observers: Arc<ObserverPool<Observation>>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        let drained = observers.drain();
+        if !drained.is_empty() {
+            let mut l = ledger.lock().unwrap();
+            let mut mutations = Vec::new();
+            for ev in drained {
+                match ev {
+                    ObsEvent::Item { subject, item } => {
+                        if l.sessions
+                            .iter()
+                            .any(|s| s.uid == subject && s.reaped_at.is_none())
+                        {
+                            let e = l.push_event_graded(
+                                &subject,
+                                &item.kind,
+                                &item.fidelity,
+                                item.payload,
+                            );
+                            mutations.push(event_mutation(&e));
+                        }
+                    }
+                    ObsEvent::Failed { subject, error } => {
+                        let e = l.push_event(
+                            &subject,
+                            "log",
+                            json!({"kind": "log", "payload":
+                                {"line": format!("terminal observer stopped: {error}")}}),
+                        );
+                        mutations.push(event_mutation(&e));
+                    }
+                    ObsEvent::Ended { .. } => {}
+                }
+            }
+            let _ = l.mirror(mutations);
+        }
+        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -277,6 +459,17 @@ impl Ledger {
     }
 
     fn push_event(&mut self, session_uid: &str, kind: &str, payload: serde_json::Value) -> Event {
+        // engine-witnessed facts are exact by definition
+        self.push_event_graded(session_uid, kind, "exact", payload)
+    }
+
+    fn push_event_graded(
+        &mut self,
+        session_uid: &str,
+        kind: &str,
+        fidelity: &str,
+        payload: serde_json::Value,
+    ) -> Event {
         let idx = self
             .events
             .iter()
@@ -287,7 +480,7 @@ impl Ledger {
             idx,
             ts: now(),
             kind: kind.to_string(),
-            fidelity: "exact".to_string(),
+            fidelity: fidelity.to_string(),
             payload,
         };
         self.events.push(event.clone());
@@ -338,6 +531,8 @@ fn provision_worker(
     ledger: Arc<Mutex<Ledger>>,
     backend: Arc<dyn EnvBackend>,
     req: ProvisionRequest,
+    observers: Arc<ObserverPool<Observation>>,
+    observe_interval: Duration,
 ) {
     let uid = req.session_uid.clone();
     {
@@ -388,6 +583,8 @@ fn provision_worker(
                 event_mutation(&state_ev),
                 event_mutation(&log_ev),
             ]);
+            drop(l);
+            watch_session(&observers, observe_interval, backend, &uid, p.handle);
         }
         Err(e) => {
             let mut l = ledger.lock().unwrap();
@@ -515,6 +712,7 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             repo: dispatch.spec.repo.clone(),
             setup: dispatch.spec.setup.clone(),
             brief: dispatch.spec.brief.clone(),
+            otel_endpoint: self.otel_endpoint_for(&env_kind),
         });
         let mutations = vec![
             dispatch.mutation(),
@@ -528,7 +726,9 @@ impl crate::mcp_generated::DisponentMcp for Engine {
 
         if let (Some(req), Some(backend)) = (provision, backend) {
             let ledger = Arc::clone(&self.ledger);
-            std::thread::spawn(move || provision_worker(ledger, backend, req));
+            let observers = Arc::clone(&self.observers);
+            let interval = self.observe_interval;
+            std::thread::spawn(move || provision_worker(ledger, backend, req, observers, interval));
         }
         Ok(session)
     }
@@ -649,6 +849,7 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         }
         let (session, event) = ledger.transition(&session_uid, "cancelled")?;
         ledger.mirror(vec![session_mutation(&session), event_mutation(&event)])?;
+        self.observers.reap(&session_uid);
         Ok(session)
     }
 
@@ -685,6 +886,7 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         let snapshot = session.clone();
         mutations.push(session_mutation(&snapshot));
         ledger.mirror(mutations)?;
+        self.observers.reap(&session_uid);
         Ok(snapshot)
     }
 
@@ -804,6 +1006,15 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                 mutations.push(event_mutation(&event));
                 ledger.dispatches.push(dispatch);
                 ledger.sessions.push(session);
+                if let Some(backend) = self.backend_for(kind) {
+                    watch_session(
+                        &self.observers,
+                        self.observe_interval,
+                        backend,
+                        session_uid,
+                        handle.clone(),
+                    );
+                }
                 report.adopted += 1;
             }
         }

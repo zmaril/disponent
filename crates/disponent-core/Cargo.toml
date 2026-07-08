@@ -17,3 +17,4 @@ uuid = { workspace = true }
 # SHA, same discipline as the codegen pin in scripts/gen.sh — bump deliberately.
 fluessig = { git = "https://github.com/zmaril/fluessig", rev = "15a2e1deaf122ebfdb6b6d392f59c111729397c1" }
 rusqlite = { version = "0.32", features = ["bundled"] }
+tiny_http = { workspace = true }
