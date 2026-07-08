@@ -16,5 +16,5 @@ uuid = { workspace = true }
 # mutations into ordered {sql, params} plans (the sink + driverPlan). Pinned by
 # SHA, same discipline as the codegen pin in scripts/gen.sh — bump deliberately.
 fluessig = { git = "https://github.com/zmaril/fluessig", rev = "15a2e1deaf122ebfdb6b6d392f59c111729397c1" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 tiny_http = { workspace = true }
