@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::{event_mutation, now, Engine, Ledger};
 use crate::catalog::upsert;
-use crate::mcp_generated::{Message, MessagesFilter, SendTarget};
+use crate::mcp_generated::{Event, Message, MessagesFilter, SendTarget};
 use crate::status::TERMINAL;
 
 /// A control-plane Message row: disponent owns these (§11); mirrored like any
@@ -47,6 +47,24 @@ pub(super) fn message_mutation(m: &Message) -> Mutation {
             json!(m.topic),
             json!(m.acked_at),
         ]],
+    )
+}
+
+/// Project a message's `mail` breadcrumb onto its own anchor timeline (exact —
+/// a record of disponent's own send, no env mediates it, §11). The one place
+/// both the Manager `send` and the worker `worker_send` mint the event, so its
+/// payload shape stays in a single spot.
+fn project_mail(ledger: &mut Ledger, message: &Message) -> Event {
+    ledger.push_event(
+        &message.session_uid,
+        "mail",
+        json!({"kind": "mail", "payload": {
+            "messageId": message.id,
+            "sender": message.sender,
+            "recipient": message.recipient,
+            "fanoutId": message.fanout_id,
+            "topic": message.topic,
+        }}),
     )
 }
 
@@ -153,19 +171,7 @@ pub(super) fn send(
                 topic: topic.clone(),
                 acked_at: None,
             };
-            // Project a `mail` breadcrumb on the anchor timeline (exact — a
-            // record of disponent's own send, no env mediates it, §11).
-            let event = ledger.push_event(
-                anchor,
-                "mail",
-                json!({"kind": "mail", "payload": {
-                    "messageId": message.id,
-                    "sender": message.sender,
-                    "recipient": message.recipient,
-                    "fanoutId": message.fanout_id,
-                    "topic": message.topic,
-                }}),
-            );
+            let event = project_mail(&mut ledger, &message);
             mutations.push(message_mutation(&message));
             mutations.push(event_mutation(&event));
             ledger.messages.push(message.clone());
@@ -252,17 +258,7 @@ pub(super) fn worker_send(
         topic,
         acked_at: None,
     };
-    let event = ledger.push_event(
-        bound_session,
-        "mail",
-        json!({"kind": "mail", "payload": {
-            "messageId": message.id,
-            "sender": message.sender,
-            "recipient": message.recipient,
-            "fanoutId": message.fanout_id,
-            "topic": message.topic,
-        }}),
-    );
+    let event = project_mail(&mut ledger, &message);
     ledger.messages.push(message.clone());
     ledger.mirror(vec![message_mutation(&message), event_mutation(&event)])?;
     Ok(vec![message])
