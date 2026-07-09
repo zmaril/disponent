@@ -125,6 +125,9 @@ struct Inner {
 struct Shared {
     /// The pty master fd — input writes and resize target it.
     master_fd: RawFd,
+    /// The child's pid (== its process-group id, it's a session leader) — a
+    /// `Signal` control frame delivers to `-child_pid`.
+    child_pid: i32,
     /// Kept alive so `master_fd` stays valid for the holder's lifetime.
     _master: OwnedFd,
     inner: Mutex<Inner>,
@@ -174,6 +177,7 @@ impl Holder {
 
         let shared = Arc::new(Shared {
             master_fd: master.as_raw_fd(),
+            child_pid,
             _master: master,
             inner: Mutex::new(Inner {
                 ring: Ring::new(config.ring_bytes),
@@ -423,6 +427,14 @@ fn client_input_loop(stream: &mut UnixStream, shared: &Arc<Shared>) -> Result<()
             }
             Some(ClientFrame::Resize { cols, rows }) => {
                 resize_master(shared.master_fd, cols, rows)?;
+            }
+            Some(ClientFrame::Signal(sig)) => {
+                // Deliver to the child's whole process group (it's a session
+                // leader, so its pid is its pgid). A stale pid just ESRCHes.
+                // SAFETY: kill on a pgid is always memory-safe.
+                unsafe {
+                    libc::kill(-shared.child_pid, sig);
+                }
             }
         }
     }

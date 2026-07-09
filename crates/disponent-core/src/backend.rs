@@ -173,6 +173,23 @@ pub trait Compute: Send {
     /// A snapshot of the worker's terminal (poll-grade observation, scraped).
     fn capture(&self) -> anyhow::Result<String>;
 
+    /// A live, byte-**exact** terminal stream, when this surface can provide one
+    /// (a first-party holder). `Some` yields exact byte chunks and the child's
+    /// real exit; `None` (the default) means callers fall back to polling
+    /// [`capture`](Compute::capture). tmux and exe.dev inherit the default —
+    /// nothing they do breaks. See [`crate::observe::TerminalStream`].
+    fn observe_stream(&self) -> anyhow::Result<Option<crate::observe::TerminalStream>> {
+        Ok(None)
+    }
+
+    /// Whether this surface's observations are byte-exact (a holder) rather than
+    /// scraped (tmux `capture-pane`). Cheap capability predicate the agent
+    /// adapter's `monitor` grades fidelity by, without opening a stream. Default
+    /// `false` — the scraped tier, unchanged for tmux/exe.dev.
+    fn observes_exact(&self) -> bool {
+        false
+    }
+
     /// Interrupt the running process (e.g. `C-c`) — the process STAYS alive
     /// (its shell returns to a prompt); the env is untouched. The raw primitive
     /// the agent adapter's `stop_work` delegates to.

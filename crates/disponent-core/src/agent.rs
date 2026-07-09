@@ -147,11 +147,18 @@ impl AgentAdapter for ClaudeCode {
     }
 
     fn monitor(&self, c: &dyn Compute) -> Result<AgentObservation> {
-        // For now the agent's state is whatever we can scrape off its pane —
-        // the same capture the watcher already diffs. Marked `scraped` because
-        // that's what it is; PR-3's detectors upgrade the fidelity.
+        // The agent's state is read off its pane — the same capture the watcher
+        // diffs. Over a first-party holder that pane is the byte-exact ring, so
+        // grade it `exact`; over tmux `capture-pane` it's a scraped snapshot.
+        // (Honest-edges, AGENTS.md: mark fidelity for what it actually is. The
+        // live byte stream is `Compute::observe_stream`; a persistent-stream
+        // observer is a coordinated engine follow-up.)
         Ok(AgentObservation {
-            fidelity: "scraped",
+            fidelity: if c.observes_exact() {
+                "exact"
+            } else {
+                "scraped"
+            },
             pane: c.capture()?,
         })
     }
