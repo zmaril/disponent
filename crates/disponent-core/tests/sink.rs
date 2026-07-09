@@ -85,24 +85,55 @@ fn reopen_rehydrates_the_ledger() {
     ));
     let _ = std::fs::remove_file(&path);
 
-    let (uid, dispatch_id) = {
+    let (uid, dispatch_id, message_id) = {
         let engine = Engine::open_with(Some(path.to_str().unwrap()), vec![]).unwrap();
         let spec: DispatchSpec = serde_json::from_value(serde_json::json!({
             "brief": "outlive the process",
             "env": "local",
             "title": "rehydrate me",
+            "tags": ["projectA"],
             "labels": {"k": "v"},
         }))
         .unwrap();
         let s = engine.dispatch(spec).unwrap();
+        // a control-plane message: disponent owns it, so the mirror is its
+        // durability (§11) — it must survive the restart below.
+        let minted = engine
+            .send(
+                Some(serde_json::from_value(serde_json::json!({ "tags": ["projectA"] })).unwrap()),
+                "use bun".into(),
+                None,
+                Some("package-manager".into()),
+            )
+            .unwrap();
+        assert_eq!(minted.len(), 1, "tag resolved the queued session");
         engine.cancel(s.uid.clone()).unwrap();
-        (s.uid, s.dispatch_id)
+        (s.uid, s.dispatch_id, minted[0].id.clone())
     }; // first disponent dies
 
     let engine = Engine::open_with(Some(path.to_str().unwrap()), vec![]).unwrap();
     let session = engine.session(uid.clone()).unwrap().expect("rehydrated");
     assert_eq!(session.state, "cancelled");
     assert_eq!(session.dispatch_id, dispatch_id);
+
+    // the message rehydrated (durability is the mirror), and ack works on it
+    let inbox = engine
+        .messages(Some(
+            serde_json::from_value(serde_json::json!({ "sessionUid": uid })).unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(inbox.len(), 1, "the message came back");
+    assert_eq!(inbox[0].id, message_id);
+    assert_eq!(inbox[0].body, "use bun");
+    assert_eq!(inbox[0].topic.as_deref(), Some("package-manager"));
+    assert!(inbox[0].acked_at.is_none());
+    engine.ack(message_id.clone()).unwrap();
+    let acked = engine
+        .messages(Some(
+            serde_json::from_value(serde_json::json!({ "sessionUid": uid })).unwrap(),
+        ))
+        .unwrap();
+    assert!(acked[0].acked_at.is_some(), "ack stamped after rehydrate");
 
     // the dispatch row came back too: env-filtered listing works through it
     let by_env = engine
@@ -112,7 +143,8 @@ fn reopen_rehydrates_the_ledger() {
         .unwrap();
     assert_eq!(by_env.len(), 1);
 
-    // events kept order and their payload envelopes
+    // events kept order and their payload envelopes: dispatch log, the send's
+    // mail breadcrumb, then the cancel transition
     let events = engine
         .events(
             Some(serde_json::from_value(serde_json::json!({"sessionUid": uid})).unwrap()),
@@ -120,10 +152,12 @@ fn reopen_rehydrates_the_ledger() {
             None,
         )
         .unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
     assert_eq!(events[0].kind, "log");
-    assert_eq!(events[1].payload["kind"], "state");
-    assert_eq!(events[1].payload["payload"]["to"], "cancelled");
+    assert_eq!(events[1].kind, "mail");
+    assert_eq!(events[1].payload["payload"]["messageId"], message_id);
+    assert_eq!(events[2].payload["kind"], "state");
+    assert_eq!(events[2].payload["payload"]["to"], "cancelled");
 
     // lifecycle ops work on rehydrated rows, and the result survives ANOTHER restart
     let reaped = engine.reap(uid.clone()).unwrap();

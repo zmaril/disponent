@@ -54,8 +54,13 @@ class TestDisponent < Minitest::Test
     second = events.next
     assert_equal "state", second.kind
 
-    # NB: our generated `send` shadows Ruby's Object#send on this class.
-    d.send(session.uid, "how goes it?")
+    # NB: our generated `send` shadows Ruby's Object#send on this class. The
+    # SendTarget is flattened to positional args: body, then tags, sessions, …
+    minted = d.send("how goes it?", nil, [session.uid])
+    assert_equal 1, minted.length
+    assert_equal "manager", minted[0].sender
+    d.ack(minted[0].id)
+    assert_equal 1, d.messages(nil, nil, session.uid).length
 
     cancelled = d.cancel(session.uid)
     assert_equal "cancelled", cancelled.state

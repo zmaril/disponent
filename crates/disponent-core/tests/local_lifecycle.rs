@@ -107,9 +107,15 @@ fn local_lifecycle_on_real_tmux() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // send types into the session
+    // send to a concrete live worker (a `sessions` target) still lands on its
+    // prompt via the interact backend delivery — the legacy send behavior.
     engine
-        .send(session.uid.clone(), "echo FOLLOWUP".into())
+        .send(
+            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
+            "echo FOLLOWUP".into(),
+            None,
+            None,
+        )
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
