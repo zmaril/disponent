@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 use chrono::{SecondsFormat, Utc};
@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::agent::{AgentAdapter, ClaudeCode};
 use crate::backend::{EnvProvider, ExeDev, StartRequest};
 use crate::catalog::{self, upsert};
+use crate::detectors::Detectors;
 use crate::local::LocalTmux;
 use crate::mcp_generated::{
     DispatchSpec, DriverPlanOptions, EnvCapability, Environment, Event, EventOptions, Offering,
@@ -86,8 +87,12 @@ fn now() -> String {
 /// is future work.
 #[derive(Clone, Debug)]
 struct LifecyclePolicy {
-    /// Max quiet time before a running session is considered stalled.
+    /// Max quiet time before a running session is considered stalled. The #25
+    /// idle-timeout detector reads this as its threshold.
     idle_secs: u64,
+    /// Max quiet time after start before the stream is considered dead. The #25
+    /// first-token dead-stream detector reads this as its threshold.
+    first_token_secs: u64,
     /// Max total wall-clock lifetime.
     wall_secs: u64,
     /// Budget ceiling, as the dispatch stated it (opaque money string for now).
@@ -97,9 +102,11 @@ struct LifecyclePolicy {
 impl Default for LifecyclePolicy {
     fn default() -> Self {
         // Sane defaults for a session with no explicit limits: idle out after 5
-        // minutes of quiet, cap the whole run at an hour.
+        // minutes of quiet, flag a dead stream one minute after start with no
+        // first token, cap the whole run at an hour.
         LifecyclePolicy {
             idle_secs: 300,
+            first_token_secs: 60,
             wall_secs: 3600,
             max_budget: None,
         }
@@ -124,8 +131,9 @@ impl LifecyclePolicy {
     /// A one-line summary for the session timeline.
     fn summary(&self) -> String {
         format!(
-            "lifecycle policy: idle={}s wall={}s budget={}",
+            "lifecycle policy: idle={}s first_token={}s wall={}s budget={}",
             self.idle_secs,
+            self.first_token_secs,
             self.wall_secs,
             self.max_budget.as_deref().unwrap_or("none")
         )
@@ -376,27 +384,37 @@ fn watch_session(
     adapter: Arc<dyn AgentAdapter>,
     uid: &str,
     handle: serde_json::Value,
-    // #28: carried so #25's stall/timeout detectors can consume it here later;
-    // PR-1 only resolves + threads it (no enforcement yet).
-    _policy: LifecyclePolicy,
+    // #28: the single resolved policy, read here for #25's detector thresholds
+    // (idle_secs, first_token_secs). Detection only — no enforcement.
+    policy: LifecyclePolicy,
 ) {
     let mut last = String::new();
+    // #25: per-session terminal-condition detectors, thresholds from the one
+    // resolved LifecyclePolicy. Pure state machines fed the real clock + an
+    // activity bit each poll; they REPORT candidate exits, they never reap.
+    let mut detectors = Detectors::new(policy.idle_secs, policy.first_token_secs);
     observers.spawn(uid.to_string(), interval, move || {
         // The agent's state read goes through the adapter's `monitor` (which
-        // wraps the compute-surface capture at scraped fidelity); PR-3's #25
-        // detectors upgrade it in place.
+        // wraps the compute-surface capture at scraped fidelity).
         let pane = backend
             .compute(&handle)
             .and_then(|c| Ok(adapter.monitor(&*c)?.pane))
             .map_err(|e| e.to_string())?;
         let delta = observe::terminal_delta(&last, &pane);
         last = pane;
-        Ok(Poll::Items(
-            delta
-                .map(observe::terminal_observation)
-                .into_iter()
-                .collect(),
-        ))
+        // Activity = the pane changed this poll. Feed (real clock, activity) to
+        // the detectors; any fired condition rides the same observation pipeline
+        // as the scraped delta, landing as a derived event. Idle resets on
+        // activity; dead-stream latches on the first token.
+        let activity = delta.is_some();
+        let mut items: Vec<Observation> = delta
+            .map(observe::terminal_observation)
+            .into_iter()
+            .collect();
+        for condition in detectors.observe(Instant::now(), activity) {
+            items.push(condition.observation());
+        }
+        Ok(Poll::Items(items))
     });
 }
 

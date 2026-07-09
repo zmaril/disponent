@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod backend;
 pub mod catalog;
+pub mod detectors;
 pub mod engine;
 pub mod local;
 pub mod mcp_generated;
