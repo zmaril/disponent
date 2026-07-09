@@ -63,6 +63,14 @@ fn seed_repo(dir: &std::path::Path) {
     git(&["commit", "-qm", "seed"]);
 }
 
+/// A freshly seeded throwaway source repo to add worktrees off of.
+fn seeded_src(tag: &str) -> std::path::PathBuf {
+    let src = std::env::temp_dir().join(format!("disponent-{tag}-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&src);
+    seed_repo(&src);
+    src
+}
+
 fn wait_for(engine: &Engine, uid: &str, state: &str) -> Session {
     common::wait_for(engine, uid, state, Duration::from_secs(10))
 }
@@ -129,10 +137,7 @@ fn worktree_isolation_adds_and_removes_a_worktree() {
         return;
     }
     let (socket, root) = sandbox("wt");
-    // A local source repo to add worktrees off of.
-    let src = std::env::temp_dir().join(format!("disponent-wt-src-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&src);
-    seed_repo(&src);
+    let src = seeded_src("wt");
 
     let engine = Engine::with_backend(LocalTmux::sandboxed(&socket, root.clone(), FAKE_AGENT));
     let spec: DispatchSpec = serde_json::from_value(serde_json::json!({
@@ -227,9 +232,7 @@ fn reap_flags_an_empty_worktree_session() {
         return;
     }
     let (socket, root) = sandbox("empty");
-    let src = std::env::temp_dir().join(format!("disponent-empty-src-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&src);
-    seed_repo(&src);
+    let src = seeded_src("empty");
 
     let engine = Engine::with_backend(LocalTmux::sandboxed(&socket, root.clone(), FAKE_AGENT));
     let session = worktree_session(&engine, &src);
@@ -266,9 +269,7 @@ fn reap_flags_a_shipped_worktree_session() {
         return;
     }
     let (socket, root) = sandbox("shipped");
-    let src = std::env::temp_dir().join(format!("disponent-shipped-src-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&src);
-    seed_repo(&src);
+    let src = seeded_src("shipped");
 
     let engine = Engine::with_backend(LocalTmux::sandboxed(&socket, root.clone(), FAKE_AGENT));
     let session = worktree_session(&engine, &src);
