@@ -1,8 +1,8 @@
 [Hh]ousekeeper
 [Hh]ousekeeping
-Straitjacket
+[Ss]traitjacket
 [Pp]owderworks
-[Pp]owdermonkey
+[Pp]owder[Mm]onkey
 Dependabot
 CODEOWNERS
 [Ll]ockfile
