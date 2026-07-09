@@ -25,111 +25,169 @@ pub trait PollStream<T>: Send + Sync {
     fn poll(&self, timeout: Duration) -> Poll<T>;
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum EnvKind {
+    #[napi(value = "local")]
     Local,
+    #[napi(value = "exe_dev")]
     ExeDev,
+    #[napi(value = "claude_code_web")]
     ClaudeCodeWeb,
+    #[napi(value = "custom")]
     Custom,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum SessionState {
+    #[napi(value = "queued")]
     Queued,
+    #[napi(value = "provisioning")]
     Provisioning,
+    #[napi(value = "running")]
     Running,
+    #[napi(value = "needs_input")]
     NeedsInput,
+    #[napi(value = "completed")]
     Completed,
+    #[napi(value = "failed")]
     Failed,
+    #[napi(value = "cancelled")]
     Cancelled,
+    #[napi(value = "lost")]
     Lost,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum ExitReason {
+    #[napi(value = "ok")]
     Ok,
+    #[napi(value = "error")]
     Error,
+    #[napi(value = "signal")]
     Signal,
+    #[napi(value = "timeout")]
     Timeout,
+    #[napi(value = "budget")]
     Budget,
+    #[napi(value = "setup")]
     Setup,
+    #[napi(value = "unknown")]
     Unknown,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum IsolationKind {
+    #[napi(value = "none")]
     None,
+    #[napi(value = "worktree")]
     Worktree,
+    #[napi(value = "container")]
     Container,
+    #[napi(value = "vm")]
     Vm,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum TemplateKind {
+    #[napi(value = "vm_image")]
     VmImage,
+    #[napi(value = "container_image")]
     ContainerImage,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum CapabilityKind {
+    #[napi(value = "dispatch")]
     Dispatch,
+    #[napi(value = "interact")]
     Interact,
+    #[napi(value = "observe_stream")]
     ObserveStream,
+    #[napi(value = "observe_poll")]
     ObservePoll,
+    #[napi(value = "list_sessions")]
     ListSessions,
+    #[napi(value = "resume")]
     Resume,
+    #[napi(value = "cancel")]
     Cancel,
+    #[napi(value = "teardown")]
     Teardown,
+    #[napi(value = "isolation_worktree")]
     IsolationWorktree,
+    #[napi(value = "isolation_container")]
     IsolationContainer,
+    #[napi(value = "isolation_vm")]
     IsolationVm,
+    #[napi(value = "templates")]
     Templates,
+    #[napi(value = "artifact_fetch")]
     ArtifactFetch,
+    #[napi(value = "usage_report")]
     UsageReport,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum EventKind {
+    #[napi(value = "state")]
     State,
+    #[napi(value = "message")]
     Message,
+    #[napi(value = "tool_call")]
     ToolCall,
+    #[napi(value = "tool_result")]
     ToolResult,
+    #[napi(value = "log")]
     Log,
+    #[napi(value = "usage")]
     Usage,
+    #[napi(value = "artifact")]
     Artifact,
+    #[napi(value = "raw")]
     Raw,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum Fidelity {
+    #[napi(value = "exact")]
     Exact,
+    #[napi(value = "derived")]
     Derived,
+    #[napi(value = "scraped")]
     Scraped,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum ArtifactKind {
+    #[napi(value = "branch")]
     Branch,
+    #[napi(value = "pull_request")]
     PullRequest,
+    #[napi(value = "patch")]
     Patch,
+    #[napi(value = "file")]
     File,
+    #[napi(value = "report")]
     Report,
+    #[napi(value = "url")]
     Url,
 }
 
-#[napi]
+#[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum McpRole {
+    #[napi(value = "supervisor")]
     Supervisor,
+    #[napi(value = "worker")]
     Worker,
 }
 
