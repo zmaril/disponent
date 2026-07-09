@@ -100,10 +100,10 @@ fn live_sessions_with_tags(ledger: &Ledger, tags: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The one messaging primitive (§6). The core send is the Manager surface:
-/// sender = manager, recipient resolved from `to`. Worker self-send (recipient
-/// forced to the Manager, anchored to the bound session) is a worker-role MCP
-/// concern — not wired here yet.
+/// The one messaging primitive (§6). This is the Manager surface: sender =
+/// manager, recipient resolved from `to`. A worker's self-send (recipient
+/// forced to the Manager, anchored to the bound session) goes through
+/// [`worker_send`], which the worker-role MCP server calls instead.
 pub(super) fn send(
     engine: &Engine,
     body: String,
@@ -111,12 +111,7 @@ pub(super) fn send(
     in_reply_to: Option<String>,
     topic: Option<String>,
 ) -> anyhow::Result<Vec<Message>> {
-    let target = to.ok_or_else(|| {
-        anyhow!(
-            "send needs a target (tags, sessions, or user); \
-             worker self-send isn't wired yet"
-        )
-    })?;
+    let target = to.ok_or_else(|| anyhow!("send needs a target: set tags, sessions, or user"))?;
 
     // Resolve the recipient party + the concrete anchor sessions. A tag
     // predicate is snapshotted at send time (§8) — a later tag change never
@@ -225,6 +220,75 @@ pub(super) fn ack(engine: &Engine, message_id: String) -> anyhow::Result<()> {
     let snapshot = ledger.messages[idx].clone();
     ledger.mirror(vec![message_mutation(&snapshot)])?;
     Ok(())
+}
+
+/// A worker's self-send (§9): sender = the bound worker session, recipient
+/// FORCED to the Manager, anchored to that session's own timeline (a
+/// worker→Manager question rides the sender's timeline). The worker names no
+/// recipient — the worker-role MCP server rejects an explicit `to` before this
+/// is reached, so a worker can never address a sibling or the environment.
+/// Mints exactly one Message (a fan-out of one). This wires the "worker
+/// self-send isn't wired yet" edge PR #1 left honest.
+pub(super) fn worker_send(
+    engine: &Engine,
+    bound_session: &str,
+    body: String,
+    in_reply_to: Option<String>,
+    topic: Option<String>,
+) -> anyhow::Result<Vec<Message>> {
+    let mut ledger = engine.ledger.lock().unwrap();
+    if !ledger.sessions.iter().any(|s| s.uid == bound_session) {
+        bail!("no session {bound_session} to send from");
+    }
+    let message = Message {
+        id: Uuid::now_v7().to_string(),
+        created_at: now(),
+        sender: "worker".to_string(),
+        recipient: "manager".to_string(),
+        session_uid: bound_session.to_string(),
+        body,
+        in_reply_to,
+        fanout_id: Uuid::now_v7().to_string(),
+        topic,
+        acked_at: None,
+    };
+    let event = ledger.push_event(
+        bound_session,
+        "mail",
+        json!({"kind": "mail", "payload": {
+            "messageId": message.id,
+            "sender": message.sender,
+            "recipient": message.recipient,
+            "fanoutId": message.fanout_id,
+            "topic": message.topic,
+        }}),
+    );
+    ledger.messages.push(message.clone());
+    ledger.mirror(vec![message_mutation(&message), event_mutation(&event)])?;
+    Ok(vec![message])
+}
+
+/// A worker acks only a message in its OWN inbox (§9): the message must be
+/// addressed to a worker and anchored to the bound session. Anything else —
+/// a sibling's inbox, a Manager→user escalation — is not this worker's to ack,
+/// and is rejected.
+pub(super) fn worker_ack(
+    engine: &Engine,
+    bound_session: &str,
+    message_id: String,
+) -> anyhow::Result<()> {
+    {
+        let ledger = engine.ledger.lock().unwrap();
+        let msg = ledger
+            .messages
+            .iter()
+            .find(|m| m.id == message_id)
+            .ok_or_else(|| anyhow!("no message {message_id}"))?;
+        if msg.session_uid != bound_session || msg.recipient != "worker" {
+            bail!("message {message_id} is not in this worker's inbox");
+        }
+    }
+    ack(engine, message_id)
 }
 
 /// Read Messages, filtered. The Manager's fan-out ack view (`{fanoutId}`) and a

@@ -33,6 +33,14 @@ enum Cmd {
         /// else = a SQLite path.
         #[arg(long)]
         sink: Option<String>,
+
+        /// The worker session this server is bound to (the env sets this when it
+        /// wires a `--role worker` endpoint). It self-scopes the two worker
+        /// writes: `send` is recipient-forced to this session's Manager and
+        /// `ack` may only touch this session's own inbox. Ignored for
+        /// supervisor servers.
+        #[arg(long)]
+        bound_session: Option<String>,
     },
 
     /// Hold a pty for an agent: open a pty, exec the command as a session
@@ -98,7 +106,11 @@ pub enum Role {
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
-        Cmd::Mcp { role, sink } => mcp_server::serve(role, sink.as_deref()),
+        Cmd::Mcp {
+            role,
+            sink,
+            bound_session,
+        } => mcp_server::serve(role, sink.as_deref(), bound_session),
         Cmd::Hold {
             uid,
             cwd,
