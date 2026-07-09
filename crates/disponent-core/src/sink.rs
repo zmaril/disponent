@@ -12,7 +12,7 @@ use fluessig::sql::Dialect;
 use rusqlite::Connection;
 use serde_json::json;
 
-use crate::mcp_generated::{DispatchSpec, Environment, Event, Session};
+use crate::mcp_generated::{DispatchSpec, Environment, Event, Message, Session};
 use crate::schema_gen::SQLITE_TABLES;
 
 /// The emitted catalog — the same source the generated code came from, loaded
@@ -114,7 +114,7 @@ impl Sink {
 
         let mut q = conn.prepare(
             "SELECT id, created_at, title, brief, repo, git_ref, isolation, template_name, \
-             setup, env_slug, agent_name, model_id, timeout_secs, max_budget, labels \
+             setup, env_slug, agent_name, model_id, timeout_secs, max_budget, labels, tags \
              FROM dispatches ORDER BY rowid",
         )?;
         let rows = q.query_map([], |r| {
@@ -134,6 +134,7 @@ impl Sink {
                 "timeoutSecs": r.get::<_, Option<i64>>(12).ok().flatten(),
                 "maxBudget": text(r, 13),
                 "labels": jsonv(text(r, 14)),
+                "tags": jsonv(text(r, 15)),
             }))
             .expect("a stored dispatch row deserializes");
             Ok(RestoredDispatch {
@@ -188,6 +189,28 @@ impl Sink {
         })?;
         restored.events = rows.collect::<Result<_, _>>()?;
 
+        // Control-plane messages: disponent owns them (no env backs them), so
+        // the mirror is their durability — rehydrate them in send order (rowid).
+        let mut q = conn.prepare(
+            "SELECT id, created_at, sender, recipient, session_uid, body, in_reply_to, \
+             fanout_id, topic, acked_at FROM messages ORDER BY rowid",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(Message {
+                id: r.get(0)?,
+                created_at: r.get(1)?,
+                sender: r.get(2)?,
+                recipient: r.get(3)?,
+                session_uid: r.get(4)?,
+                body: r.get(5)?,
+                in_reply_to: r.get(6)?,
+                fanout_id: r.get(7)?,
+                topic: r.get(8)?,
+                acked_at: r.get(9)?,
+            })
+        })?;
+        restored.messages = rows.collect::<Result<_, _>>()?;
+
         Ok(Some(restored))
     }
 }
@@ -200,6 +223,7 @@ pub struct Restored {
     pub dispatches: Vec<RestoredDispatch>,
     pub sessions: Vec<Session>,
     pub events: Vec<Event>,
+    pub messages: Vec<Message>,
 }
 
 pub struct RestoredDispatch {
