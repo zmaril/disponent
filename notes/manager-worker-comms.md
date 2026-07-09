@@ -208,6 +208,17 @@ pull path reads. `EventKind.message` (an agent's own transcript line) and
 `EventKind.mail` (a control-plane message) stay distinct — one is observed,
 the other is minted. Fidelity of every `mail` event is `exact` (§11).
 
+**Does the recipient know who it is from?** Yes, in two parts. The `mail` event
+surfaces the coarse `sender: Party` (`manager` / `worker` / `user`), and the
+*specific* counterpart is the event's anchor `session` (`Event.session`): a
+worker→Manager message rides the sending worker's timeline, so when the Manager
+reads its inbox each `mail` event's anchor names **which** worker asked —
+exactly the uid it needs to answer or escalate correctly (§10). A worker's own
+inbox is the mirror image: every inbound message is `sender: manager` (there is
+one Manager, so the role alone identifies the sender — the field is present but
+constant), anchored to the worker's own session. So "who it is from" is always
+answerable: the role from `sender`, the identity from the anchor `session`.
+
 ## 5. The role gate, refined — `@worker` gates exactly one op
 
 The smallest possible change. Add one op-level decorator, `@worker`, meaning
@@ -582,3 +593,13 @@ draft 1's `ask`/`answer`/`escalate`.
    mid-fan-out (memory-only, no mirror flush), a subset is delivered. Acceptable
    (at-least-once per recipient is independent), or does pm need a fan-out id to
    detect partials? Leaning acceptable.
+6. **Escalation provenance.** When the Manager relays a user's answer down to a
+   worker (§10), the worker sees it as `sender: manager` with `inReplyTo` to its
+   original question — the simplest honest option, and the one specified here:
+   the worker cannot tell whether the Manager or the human authored the answer,
+   and does not need to (the escalation is the Manager's concern, design §7). The
+   alternative — carry a provenance marker (say an `origin: Party` on the relayed
+   message) so a worker *can* see the answer came from the user — is deferred;
+   adopt it only if a worker ever needs to act differently on a human-authored
+   answer. Either way the full trail stays legible on the Manager side via the
+   `inReplyTo` chain and the `recipient=user` message in it.
