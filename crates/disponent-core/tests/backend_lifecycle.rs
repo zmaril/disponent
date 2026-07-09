@@ -82,6 +82,39 @@ fn backed_dispatch_runs_sends_cancels_reaps() {
 }
 
 #[test]
+fn coarse_backend_emits_no_delivery_verdict() {
+    // exe.dev can't diff the worker's file system, so its delivery_signal is the
+    // honest default None — reap must emit NO delivery event (no faked verdict).
+    let engine = Engine::with_backend(ExeDev::dry_run());
+    let session = engine.dispatch(spec()).unwrap();
+    wait_for(&engine, &session.uid, "running");
+    engine.reap(session.uid.clone()).unwrap();
+
+    let events = engine
+        .events(
+            Some(
+                serde_json::from_value(serde_json::json!({"sessionUid": session.uid.clone()}))
+                    .unwrap(),
+            ),
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == "raw" && e.payload["payload"]["source"] == "delivery"),
+        "coarse backend must not fake a delivery verdict"
+    );
+    let reaped = engine.session(session.uid).unwrap().unwrap();
+    assert!(
+        reaped.exit_detail.is_none(),
+        "no delivery note on a coarse reap: {:?}",
+        reaped.exit_detail
+    );
+}
+
+#[test]
 fn reconcile_marks_vanished_workers_lost() {
     let engine = Engine::with_backend(ExeDev::dry_run());
     let session = engine.dispatch(spec()).unwrap();

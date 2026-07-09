@@ -76,6 +76,20 @@ pub trait EnvBackend: Send + Sync {
     fn workspace_link(&self, _handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+
+    /// Delivery assessment: did this session actually ship a diff, or exit
+    /// having changed nothing? Answered while the env is still live (the engine
+    /// calls it at reap, before teardown).
+    ///
+    /// Honest by construction: `None` means this backend can't diff the work
+    /// dir — a coarse env with no visible file system to compare — so the
+    /// engine emits NO verdict rather than fake one. `Some(true)` = the work
+    /// dir / worktree changed; `Some(false)` = it is pristine (the agent
+    /// produced nothing). The default is `None`, so any backend that hasn't
+    /// opted in stays honest-by-omission with no edit.
+    fn delivery_signal(&self, _handle: &serde_json::Value) -> Option<bool> {
+        None
+    }
 }
 
 /// What a backend hands the engine for a fresh worker.
@@ -542,6 +556,15 @@ mod tests {
             brief: "do the thing".into(),
             otel_endpoint: None,
         }
+    }
+
+    #[test]
+    fn exe_dev_is_coarse_no_delivery_signal() {
+        // exe.dev can't diff the worker file system, so it stays on the honest
+        // default: no verdict rather than a faked one.
+        let b = ExeDev::dry_run();
+        let handle = serde_json::json!({"vmName": "dsp-x", "host": "dsp-x.exe.xyz"});
+        assert_eq!(EnvBackend::delivery_signal(&b, &handle), None);
     }
 
     #[test]

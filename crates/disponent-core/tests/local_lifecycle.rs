@@ -63,6 +63,14 @@ fn seed_repo(dir: &std::path::Path) {
     git(&["commit", "-qm", "seed"]);
 }
 
+/// A freshly seeded throwaway source repo to add worktrees off of.
+fn seeded_src(tag: &str) -> std::path::PathBuf {
+    let src = std::env::temp_dir().join(format!("disponent-{tag}-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&src);
+    seed_repo(&src);
+    src
+}
+
 fn wait_for(engine: &Engine, uid: &str, state: &str) -> Session {
     common::wait_for(engine, uid, state, Duration::from_secs(10))
 }
@@ -129,10 +137,7 @@ fn worktree_isolation_adds_and_removes_a_worktree() {
         return;
     }
     let (socket, root) = sandbox("wt");
-    // A local source repo to add worktrees off of.
-    let src = std::env::temp_dir().join(format!("disponent-wt-src-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&src);
-    seed_repo(&src);
+    let src = seeded_src("wt");
 
     let engine = Engine::with_backend(LocalTmux::sandboxed(&socket, root.clone(), FAKE_AGENT));
     let spec: DispatchSpec = serde_json::from_value(serde_json::json!({
@@ -190,6 +195,107 @@ fn worktree_isolation_adds_and_removes_a_worktree() {
         !list.contains(&task.display().to_string()),
         "worktree deregistered from parent (no dangling registration):\n{list}"
     );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&src);
+}
+
+/// The delivery verdict event a reaped session recorded, if any.
+fn delivery_event(engine: &Engine, uid: &str) -> Option<disponent_core::mcp_generated::Event> {
+    engine
+        .events(
+            Some(serde_json::from_value(serde_json::json!({"sessionUid": uid})).unwrap()),
+            None,
+            None,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "raw" && e.payload["payload"]["source"] == "delivery")
+}
+
+fn worktree_session(engine: &Engine, src: &std::path::Path) -> Session {
+    let spec: DispatchSpec = serde_json::from_value(serde_json::json!({
+        "brief": "worktree me",
+        "env": "local",
+        "repo": src.display().to_string(),
+        "isolation": "worktree",
+    }))
+    .unwrap();
+    let session = engine.dispatch(spec).unwrap();
+    wait_for(engine, &session.uid, "running");
+    session
+}
+
+#[test]
+fn reap_flags_an_empty_worktree_session() {
+    if !have_tmux() || !have_git() {
+        eprintln!("tmux/git not installed; skipping");
+        return;
+    }
+    let (socket, root) = sandbox("empty");
+    let src = seeded_src("empty");
+
+    let engine = Engine::with_backend(LocalTmux::sandboxed(&socket, root.clone(), FAKE_AGENT));
+    let session = worktree_session(&engine, &src);
+
+    // The fake agent never touches the tree → nothing shipped. Reap assesses the
+    // worktree while it's still live, before teardown removes it.
+    engine.reap(session.uid.clone()).unwrap();
+
+    let ev = delivery_event(&engine, &session.uid).expect("a delivery verdict event");
+    assert_eq!(ev.fidelity, "derived");
+    assert_eq!(ev.payload["payload"]["data"]["verdict"], "empty");
+    assert_eq!(ev.payload["payload"]["data"]["worktree_changed"], false);
+    assert_eq!(ev.payload["payload"]["data"]["artifacts"], 0);
+
+    let reaped = engine.session(session.uid).unwrap().unwrap();
+    assert!(
+        reaped
+            .exit_detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("empty diff"),
+        "exit_detail reflects the empty verdict: {:?}",
+        reaped.exit_detail
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&src);
+}
+
+#[test]
+fn reap_flags_a_shipped_worktree_session() {
+    if !have_tmux() || !have_git() {
+        eprintln!("tmux/git not installed; skipping");
+        return;
+    }
+    let (socket, root) = sandbox("shipped");
+    let src = seeded_src("shipped");
+
+    let engine = Engine::with_backend(LocalTmux::sandboxed(&socket, root.clone(), FAKE_AGENT));
+    let session = worktree_session(&engine, &src);
+
+    // Stand in for the agent's output: an uncommitted change in the worktree.
+    let task = root.join(&session.uid).join("task");
+    std::fs::write(task.join("NEW.md"), "the agent's work\n").unwrap();
+
+    engine.reap(session.uid.clone()).unwrap();
+
+    let ev = delivery_event(&engine, &session.uid).expect("a delivery verdict event");
+    assert_eq!(ev.fidelity, "derived");
+    assert_eq!(ev.payload["payload"]["data"]["verdict"], "shipped");
+    assert_eq!(ev.payload["payload"]["data"]["worktree_changed"], true);
+
+    let reaped = engine.session(session.uid).unwrap().unwrap();
+    assert!(
+        reaped
+            .exit_detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("shipped"),
+        "exit_detail reflects the shipped verdict: {:?}",
+        reaped.exit_detail
+    );
+
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&src);
 }

@@ -301,6 +301,53 @@ impl EnvBackend for LocalTmux {
         Ok(Some(format!("vscode://file{work_dir}/task")))
     }
 
+    /// Diff the session's work dir to see whether it shipped anything. The task
+    /// dir (`<workDir>/task`) is a git repo (a clone or a worktree); a change
+    /// is either uncommitted tree changes or commits the session's branch made
+    /// past the base it forked from. A pure-prompt session with no git repo has
+    /// no baseline to diff — return `None` (honest omission) rather than guess.
+    fn delivery_signal(&self, handle: &serde_json::Value) -> Option<bool> {
+        // No work dir (dry-run, or a doctored handle) = nothing to diff.
+        let work = handle["workDir"].as_str()?;
+        let task = PathBuf::from(work).join("task");
+        // Only a git work dir carries a baseline; without `.git` we can't judge.
+        if !task.join(".git").exists() {
+            return None;
+        }
+        let git = |args: &[&str]| -> Option<String> {
+            let mut argv = vec![
+                "git".to_string(),
+                "-C".to_string(),
+                task.display().to_string(),
+            ];
+            argv.extend(args.iter().map(|s| s.to_string()));
+            run_argv(&argv, None).ok()
+        };
+        // Uncommitted work in the tree is the plainest evidence of a diff.
+        if !git(&["status", "--porcelain"])?.trim().is_empty() {
+            return Some(true);
+        }
+        // Committed work: HEAD sits on a commit no OTHER branch/remote ref
+        // reaches — i.e. the session's branch advanced past its fork point. If
+        // some other ref still contains HEAD, the branch never moved.
+        let head_ref = git(&["symbolic-ref", "--quiet", "HEAD"]).unwrap_or_default();
+        let head_ref = head_ref.trim();
+        let contains = git(&[
+            "for-each-ref",
+            "--contains",
+            "HEAD",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        ])?;
+        let advanced = contains
+            .lines()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .all(|r| r == head_ref);
+        Some(advanced)
+    }
+
     fn survey(&self) -> anyhow::Result<Vec<(String, serde_json::Value)>> {
         if self.dry_run {
             return Ok(vec![]);
