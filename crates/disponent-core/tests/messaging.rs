@@ -31,8 +31,8 @@ fn send_mints_one_message_per_recipient_sharing_a_fanout_id() {
 
     let minted = engine
         .send(
-            Some(to(serde_json::json!({ "sessions": [a.uid, b.uid] }))),
             "use bun, not npm".into(),
+            Some(to(serde_json::json!({ "sessions": [a.uid, b.uid] }))),
             None,
             Some("package-manager".into()),
         )
@@ -72,8 +72,8 @@ fn tag_selection_snapshots_the_live_sessions_at_send_time() {
     // a tag fan-out resolves ONLY the matching-tag sessions live at send time.
     let first = engine
         .send(
-            Some(to(serde_json::json!({ "tags": ["projectA"] }))),
             "first".into(),
+            Some(to(serde_json::json!({ "tags": ["projectA"] }))),
             None,
             Some("pm".into()),
         )
@@ -86,8 +86,8 @@ fn tag_selection_snapshots_the_live_sessions_at_send_time() {
     let c = engine.dispatch(tagged_spec(&["projectA"])).unwrap();
     let second = engine
         .send(
-            Some(to(serde_json::json!({ "tags": ["projectA"] }))),
             "second".into(),
+            Some(to(serde_json::json!({ "tags": ["projectA"] }))),
             None,
             Some("pm".into()),
         )
@@ -100,8 +100,8 @@ fn tag_selection_snapshots_the_live_sessions_at_send_time() {
     // an unmatched tag mints nothing (honest, not an error)
     let none = engine
         .send(
-            Some(to(serde_json::json!({ "tags": ["nope"] }))),
             "nobody".into(),
+            Some(to(serde_json::json!({ "tags": ["nope"] }))),
             None,
             None,
         )
@@ -117,16 +117,16 @@ fn messages_read_collapses_latest_per_recipient_topic() {
     // two same-topic directives to the same recipient, newest wins
     engine
         .send(
-            Some(to(serde_json::json!({ "sessions": [a.uid] }))),
             "use pnpm".into(),
+            Some(to(serde_json::json!({ "sessions": [a.uid] }))),
             None,
             Some("package-manager".into()),
         )
         .unwrap();
     let bun = engine
         .send(
-            Some(to(serde_json::json!({ "sessions": [a.uid] }))),
             "actually, use bun".into(),
+            Some(to(serde_json::json!({ "sessions": [a.uid] }))),
             None,
             Some("package-manager".into()),
         )
@@ -134,8 +134,8 @@ fn messages_read_collapses_latest_per_recipient_topic() {
     // a standalone (no-topic) message is never collapsed
     engine
         .send(
-            Some(to(serde_json::json!({ "sessions": [a.uid] }))),
             "unrelated note".into(),
+            Some(to(serde_json::json!({ "sessions": [a.uid] }))),
             None,
             None,
         )
@@ -176,8 +176,8 @@ fn ack_stamps_a_message_and_shows_fanout_progress() {
 
     let minted = engine
         .send(
-            Some(to(serde_json::json!({ "tags": ["x"] }))),
             "directive".into(),
+            Some(to(serde_json::json!({ "tags": ["x"] }))),
             None,
             None,
         )
@@ -210,7 +210,7 @@ fn send_with_no_target_is_an_honest_capability_edge() {
     let engine = Engine::new();
     // The core send is the Manager surface; worker self-send (recipient forced
     // to the Manager) isn't wired yet — a targetless send says so, never fakes.
-    let err = engine.send(None, "hi".into(), None, None).unwrap_err();
+    let err = engine.send("hi".into(), None, None, None).unwrap_err();
     assert!(
         err.to_string().contains("worker self-send isn't wired yet"),
         "unexpected: {err}"

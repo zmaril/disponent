@@ -58,11 +58,11 @@ def test_whole_lifecycle():
     second = next(events)
     assert second.kind == EventKind.State
 
-    minted = d.send({"sessions": [session.uid]}, "how goes it?")
+    minted = d.send("how goes it?", sessions=[session.uid])
     assert len(minted) == 1
     assert minted[0].recipient == Party.Worker
     d.ack(minted[0].id)
-    assert d.messages({"session_uid": session.uid})[0].acked_at is not None
+    assert d.messages(session_uid=session.uid)[0].acked_at is not None
 
     cancelled = d.cancel(session.uid)
     assert cancelled.state == SessionState.Cancelled

@@ -896,8 +896,8 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
     fn send(
         &self,
-        to: Option<SendTarget>,
         body: String,
+        to: Option<SendTarget>,
         in_reply_to: Option<String>,
         topic: Option<String>,
     ) -> anyhow::Result<Vec<Message>>;
@@ -1197,7 +1197,7 @@ impl Disponent {
 
         let out = self
             .core
-            .send(Some(send_target_arg), body, in_reply_to, topic)
+            .send(body, Some(send_target_arg), in_reply_to, topic)
             .map_err(rberr)?;
         let ruby = Ruby::get().map_err(|e| rberr(e))?;
         let ary = ruby.ary_new();

@@ -307,13 +307,13 @@ impl DisponentCore for DisponentImpl {
 
     fn send(
         &self,
-        to: Option<SendTarget>,
         body: String,
+        to: Option<SendTarget>,
         in_reply_to: Option<String>,
         topic: Option<String>,
     ) -> anyhow::Result<Vec<Message>> {
         self.engine
-            .send(to.map(send_target_in), body, in_reply_to, topic)?
+            .send(body, to.map(send_target_in), in_reply_to, topic)?
             .into_iter()
             .map(message_out)
             .collect()

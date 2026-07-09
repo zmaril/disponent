@@ -100,8 +100,8 @@ fn reopen_rehydrates_the_ledger() {
         // durability (§11) — it must survive the restart below.
         let minted = engine
             .send(
-                Some(serde_json::from_value(serde_json::json!({ "tags": ["projectA"] })).unwrap()),
                 "use bun".into(),
+                Some(serde_json::from_value(serde_json::json!({ "tags": ["projectA"] })).unwrap()),
                 None,
                 Some("package-manager".into()),
             )

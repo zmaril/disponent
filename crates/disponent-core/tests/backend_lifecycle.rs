@@ -67,8 +67,8 @@ fn backed_dispatch_runs_sends_cancels_reaps() {
     // sender=manager) and projects a `mail` breadcrumb on its timeline (exact).
     let minted = engine
         .send(
-            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
             "how's it going?".into(),
+            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
             None,
             None,
         )
@@ -96,8 +96,8 @@ fn backed_dispatch_runs_sends_cancels_reaps() {
     // recipient pulls it) — it just isn't delivered to a live prompt.
     let after_cancel = engine
         .send(
-            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
             "hello?".into(),
+            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
             None,
             None,
         )

@@ -111,8 +111,8 @@ fn local_lifecycle_on_real_tmux() {
     // prompt via the interact backend delivery — the legacy send behavior.
     engine
         .send(
-            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
             "echo FOLLOWUP".into(),
+            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
             None,
             None,
         )

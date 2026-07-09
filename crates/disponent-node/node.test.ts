@@ -81,7 +81,7 @@ test("the whole lifecycle from JS", async () => {
 
   // send is the manager↔worker messaging primitive: a `sessions` target mints
   // one Message per recipient and (best-effort) prompts the live worker.
-  const minted = await d.send({ sessions: [session.uid] }, "how goes it?");
+  const minted = await d.send("how goes it?", { sessions: [session.uid] });
   expect(minted.length).toBe(1);
   expect(minted[0].sender).toBe(Party.Manager);
   expect(minted[0].recipient).toBe(Party.Worker);

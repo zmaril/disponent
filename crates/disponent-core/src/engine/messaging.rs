@@ -106,8 +106,8 @@ fn live_sessions_with_tags(ledger: &Ledger, tags: &[String]) -> Vec<String> {
 /// concern — not wired here yet.
 pub(super) fn send(
     engine: &Engine,
-    to: Option<SendTarget>,
     body: String,
+    to: Option<SendTarget>,
     in_reply_to: Option<String>,
     topic: Option<String>,
 ) -> anyhow::Result<Vec<Message>> {

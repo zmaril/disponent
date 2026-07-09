@@ -971,15 +971,15 @@
           "shape": "unary",
           "params": [
             {
+              "name": "body",
+              "type": "string"
+            },
+            {
               "name": "to",
               "type": {
                 "model": "SendTarget"
               },
               "optional": true
-            },
-            {
-              "name": "body",
-              "type": "string"
             },
             {
               "name": "inReplyTo",

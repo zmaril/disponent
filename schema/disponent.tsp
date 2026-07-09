@@ -553,7 +553,7 @@ interface Disponent {
    * interact-capable env (the legacy `send` behavior, now one backend delivery).
    * Worker self-send (recipient forced to the Manager) is a worker-role MCP
    * concern, deferred — the core send is the Manager surface. */
-  send(to?: SendTarget, body: string, inReplyTo?: MessageId, topic?: string): Message[];
+  send(body: string, to?: SendTarget, inReplyTo?: MessageId, topic?: string): Message[];
 
   /** Acknowledge a message you received (received/handled): stamps `ackedAt`,
    * which the Manager observes across a `fanoutId` to see "N of M acted" (§7).

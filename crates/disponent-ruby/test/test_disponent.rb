@@ -32,7 +32,11 @@ class TestDisponent < Minitest::Test
     assert(caps.any? { |c| c.env_slug == "exe-dev" && c.capability == "isolation_vm" })
     refute(caps.any? { |c| c.env_slug == "local" && c.capability == "isolation_vm" })
 
-    session = d.dispatch("say hi from ruby", "local")
+    # dispatch flattens to positional optionals; tags is the 12th (after the 11
+    # scalar optionals agent..unchecked), carried here so the fan-out send below
+    # can address it.
+    session = d.dispatch("say hi from ruby", "local",
+                         nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, ["ruby-fanout"])
     assert_equal "queued", session.state
 
     # Ruby omits the @manual wait(); poll session() until the dry-run
@@ -55,12 +59,18 @@ class TestDisponent < Minitest::Test
     assert_equal "state", second.kind
 
     # NB: our generated `send` shadows Ruby's Object#send on this class. The
-    # SendTarget is flattened to positional args: body, then tags, sessions, …
-    minted = d.send("how goes it?", nil, [session.uid])
+    # SendTarget flattens to positional args (body, tags, sessions, user, …);
+    # scan_args can't take an explicit nil for the Vec-typed tags/sessions, so
+    # target by tags (the first optional) — the primary fan-out path.
+    minted = d.send("how goes it?", ["ruby-fanout"])
     assert_equal 1, minted.length
     assert_equal "manager", minted[0].sender
     d.ack(minted[0].id)
-    assert_equal 1, d.messages(nil, nil, session.uid).length
+    # filter by fanoutId (the first optional) — scan_args can't skip a leading
+    # optional with an explicit nil, so address the fan-out directly.
+    fanout = d.messages(minted[0].fanout_id)
+    assert_equal 1, fanout.length
+    refute_nil fanout[0].acked_at
 
     cancelled = d.cancel(session.uid)
     assert_equal "cancelled", cancelled.state
@@ -92,10 +102,10 @@ class TestDisponent < Minitest::Test
 
   def test_bad_inputs_fail_at_the_seam
     d = open
-    # labels is the 12th (last) optional param; pass the 11 preceding as nil.
+    # labels is the 13th (last) optional param; pass the 12 preceding as nil.
     err = assert_raises(RuntimeError) do
-      # 2 required (brief, env) + 11 nil optionals, then labels (the 12th).
-      d.dispatch("x", "local", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "not json")
+      # 2 required (brief, env) + 12 nil optionals (agent..tags), then labels.
+      d.dispatch("x", "local", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "not json")
     end
     assert_includes err.message, "labels"
 

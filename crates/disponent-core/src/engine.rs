@@ -1084,12 +1084,12 @@ impl crate::mcp_generated::DisponentMcp for Engine {
     /// lives in [`messaging`] to keep this file under the size budget.
     fn send(
         &self,
-        to: Option<SendTarget>,
         body: String,
+        to: Option<SendTarget>,
         in_reply_to: Option<String>,
         topic: Option<String>,
     ) -> anyhow::Result<Vec<Message>> {
-        messaging::send(self, to, body, in_reply_to, topic)
+        messaging::send(self, body, to, in_reply_to, topic)
     }
 
     fn ack(&self, message_id: String) -> anyhow::Result<()> {

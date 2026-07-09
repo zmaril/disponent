@@ -478,8 +478,8 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
     fn send(
         &self,
-        to: Option<SendTarget>,
         body: String,
+        to: Option<SendTarget>,
         in_reply_to: Option<String>,
         topic: Option<String>,
     ) -> anyhow::Result<Vec<Message>>;
@@ -684,8 +684,8 @@ impl Task for WorkspaceLinkTask {
 
 pub struct SendTask {
     core: Arc<crate::core_impl::DisponentImpl>,
-    to: Option<SendTarget>,
     body: String,
+    to: Option<SendTarget>,
     in_reply_to: Option<String>,
     topic: Option<String>,
 }
@@ -695,8 +695,8 @@ impl Task for SendTask {
     fn compute(&mut self) -> Result<Self::Output> {
         self.core
             .send(
-                self.to.clone(),
                 self.body.clone(),
+                self.to.clone(),
                 self.in_reply_to.clone(),
                 self.topic.clone(),
             )
@@ -892,15 +892,15 @@ impl Disponent {
     #[napi(ts_return_type = "Promise<Message[]>")]
     pub fn send(
         &self,
-        to: Option<SendTarget>,
         body: String,
+        to: Option<SendTarget>,
         in_reply_to: Option<String>,
         topic: Option<String>,
     ) -> AsyncTask<SendTask> {
         AsyncTask::new(SendTask {
             core: self.core.clone(),
-            to,
             body,
+            to,
             in_reply_to,
             topic,
         })

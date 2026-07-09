@@ -240,8 +240,8 @@ pub trait DisponentMcp {
     ) -> anyhow::Result<Vec<Event>>;
     fn send(
         &self,
-        to: Option<SendTarget>,
         body: String,
+        to: Option<SendTarget>,
         in_reply_to: Option<String>,
         topic: Option<String>,
     ) -> anyhow::Result<Vec<Message>>;
@@ -301,13 +301,13 @@ pub fn dispatch<T0: DisponentMcp>(
             )?)
         }
         "disponent_send" => {
-            let to: Option<SendTarget> = opt_arg(args, "to")?;
             let body: String = arg(args, "body")?;
+            let to: Option<SendTarget> = opt_arg(args, "to")?;
             let in_reply_to: Option<String> = opt_arg(args, "inReplyTo")?;
             let topic: Option<String> = opt_arg(args, "topic")?;
             Ok(serde_json::to_value(disponent.send(
-                to,
                 body,
+                to,
                 in_reply_to,
                 topic,
             )?)?)

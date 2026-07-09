@@ -803,8 +803,8 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
     fn send(
         &self,
-        to: Option<SendTarget>,
         body: String,
+        to: Option<SendTarget>,
         in_reply_to: Option<String>,
         topic: Option<String>,
     ) -> anyhow::Result<Vec<Message>>;
@@ -1008,14 +1008,14 @@ impl Disponent {
     /// interact-capable env (the legacy `send` behavior, now one backend delivery).
     /// Worker self-send (recipient forced to the Manager) is a worker-role MCP
     /// concern, deferred — the core send is the Manager surface.
-    #[pyo3(signature = (tags=None, sessions=None, user=None, body, in_reply_to=None, topic=None))]
+    #[pyo3(signature = (body, tags=None, sessions=None, user=None, in_reply_to=None, topic=None))]
     fn send(
         &self,
         py: Python<'_>,
+        body: String,
         tags: Option<Vec<String>>,
         sessions: Option<Vec<String>>,
         user: Option<String>,
-        body: String,
         in_reply_to: Option<String>,
         topic: Option<String>,
     ) -> PyResult<Vec<Message>> {
@@ -1026,7 +1026,7 @@ impl Disponent {
         };
 
         let core = self.core.clone();
-        py.detach(move || core.send(Some(send_target_arg), body, in_reply_to, topic))
+        py.detach(move || core.send(body, Some(send_target_arg), in_reply_to, topic))
             .map_err(err)
     }
     /// Acknowledge a message you received (received/handled): stamps `ackedAt`,
