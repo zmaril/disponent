@@ -20,6 +20,7 @@ use fluessig::sql::Dialect;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::agent::{AgentAdapter, ClaudeCode};
 use crate::backend::{EnvProvider, ExeDev, StartRequest};
 use crate::catalog::{self, upsert};
 use crate::local::LocalTmux;
@@ -39,6 +40,10 @@ pub struct Engine {
     ledger: Arc<Mutex<Ledger>>,
     /// One backend per environment kind; a kind with no backend queues honestly.
     backends: Vec<Arc<dyn EnvProvider>>,
+    /// One adapter per agent, selected by the resolved `agent` string; an agent
+    /// with no adapter queues honestly (running a worker needs both a backend
+    /// and an adapter). A second agent CLI is a new adapter, not a new backend.
+    adapters: Vec<Arc<dyn AgentAdapter>>,
     /// Terminal observers (one thread per watched session) funneling into the
     /// collector, which folds observations into the ledger.
     observers: Arc<ObserverPool<Observation>>,
@@ -207,24 +212,33 @@ impl Engine {
         ledger.sink = sink;
         let engine = Engine::assemble(ledger, backends);
         // Rehydrated running sessions get watched again.
-        let watchable: Vec<(String, serde_json::Value, Option<String>)> = {
+        #[allow(clippy::type_complexity)]
+        let watchable: Vec<(String, serde_json::Value, Option<String>, Option<String>)> = {
             let ledger = engine.ledger.lock().unwrap();
             ledger
                 .sessions
                 .iter()
                 .filter(|s| s.state == "running" && s.reaped_at.is_none())
                 .filter_map(|s| {
-                    s.env_handle
-                        .clone()
-                        .map(|h| (s.uid.clone(), h, ledger.env_kind_of(&s.uid)))
+                    s.env_handle.clone().map(|h| {
+                        (
+                            s.uid.clone(),
+                            h,
+                            ledger.env_kind_of(&s.uid),
+                            ledger.agent_of(&s.uid),
+                        )
+                    })
                 })
                 .collect()
         };
-        for (uid, handle, kind) in watchable {
-            if let Some(backend) = kind.and_then(|k| engine.backend_for(&k)) {
+        for (uid, handle, kind, agent) in watchable {
+            if let (Some(backend), Some(adapter)) = (
+                kind.and_then(|k| engine.backend_for(&k)),
+                agent.and_then(|a| engine.adapter_for(&a)),
+            ) {
                 // Rehydrated watchers don't carry the dispatch's limits forward;
                 // policy is logged/stored only in PR-1, so a default is honest.
-                engine.watch(&uid, backend, handle, LifecyclePolicy::default());
+                engine.watch(&uid, backend, adapter, handle, LifecyclePolicy::default());
             }
         }
         Ok(engine)
@@ -262,6 +276,9 @@ impl Engine {
         Engine {
             ledger,
             backends,
+            // The shipped adapters: today just claude-code. Selection is by the
+            // catalog `agent` string, mirroring backend selection by env-kind.
+            adapters: vec![Arc::new(ClaudeCode)],
             observers,
             observe_interval,
             collector_stop,
@@ -302,6 +319,7 @@ impl Engine {
         &self,
         uid: &str,
         backend: Arc<dyn EnvProvider>,
+        adapter: Arc<dyn AgentAdapter>,
         handle: serde_json::Value,
         policy: LifecyclePolicy,
     ) {
@@ -309,6 +327,7 @@ impl Engine {
             &self.observers,
             self.observe_interval,
             backend,
+            adapter,
             uid,
             handle,
             policy,
@@ -317,6 +336,27 @@ impl Engine {
 
     fn backend_for(&self, kind: &str) -> Option<Arc<dyn EnvProvider>> {
         self.backends.iter().find(|b| b.kind() == kind).cloned()
+    }
+
+    fn adapter_for(&self, agent: &str) -> Option<Arc<dyn AgentAdapter>> {
+        self.adapters.iter().find(|a| a.agent() == agent).cloned()
+    }
+
+    /// The (backend, adapter) pair that drives a session's worker, resolved off
+    /// a locked ledger from the session's dispatch (env-kind → backend, agent →
+    /// adapter). Either is `None` when nothing's registered for it — the caller
+    /// then behaves honestly (no reachable worker). The one resolution the
+    /// interact ops (send/cancel/reap) share.
+    #[allow(clippy::type_complexity)]
+    fn routing(
+        &self,
+        ledger: &Ledger,
+        uid: &str,
+    ) -> (Option<Arc<dyn EnvProvider>>, Option<Arc<dyn AgentAdapter>>) {
+        (
+            ledger.env_kind_of(uid).and_then(|k| self.backend_for(&k)),
+            ledger.agent_of(uid).and_then(|a| self.adapter_for(&a)),
+        )
     }
 }
 
@@ -333,6 +373,7 @@ fn watch_session(
     observers: &ObserverPool<Observation>,
     interval: Duration,
     backend: Arc<dyn EnvProvider>,
+    adapter: Arc<dyn AgentAdapter>,
     uid: &str,
     handle: serde_json::Value,
     // #28: carried so #25's stall/timeout detectors can consume it here later;
@@ -341,9 +382,12 @@ fn watch_session(
 ) {
     let mut last = String::new();
     observers.spawn(uid.to_string(), interval, move || {
+        // The agent's state read goes through the adapter's `monitor` (which
+        // wraps the compute-surface capture at scraped fidelity); PR-3's #25
+        // detectors upgrade it in place.
         let pane = backend
             .compute(&handle)
-            .and_then(|c| c.capture())
+            .and_then(|c| Ok(adapter.monitor(&*c)?.pane))
             .map_err(|e| e.to_string())?;
         let delta = observe::terminal_delta(&last, &pane);
         last = pane;
@@ -596,6 +640,16 @@ impl Ledger {
             .find(|e| e.slug == dispatch.spec.env)
             .map(|e| e.kind.clone())
     }
+
+    /// The catalog-resolved agent a session runs (via its dispatch) — how the
+    /// engine picks the [`AgentAdapter`](crate::agent::AgentAdapter) to drive it.
+    fn agent_of(&self, uid: &str) -> Option<String> {
+        let session = self.sessions.iter().find(|s| s.uid == uid)?;
+        self.dispatches
+            .iter()
+            .find(|d| d.id == session.dispatch_id)
+            .map(|d| d.agent.clone())
+    }
 }
 
 /// The background half of a backed dispatch: provision the worker, then flip
@@ -604,6 +658,7 @@ impl Ledger {
 fn provision_worker(
     ledger: Arc<Mutex<Ledger>>,
     backend: Arc<dyn EnvProvider>,
+    adapter: Arc<dyn AgentAdapter>,
     req: StartRequest,
     observers: Arc<ObserverPool<Observation>>,
     observe_interval: Duration,
@@ -625,15 +680,19 @@ fn provision_worker(
         }
     }
 
-    // START stands the worker up, then the engine launches the agent as an
-    // explicit step on the fresh shell (the Compute surface). A failure at any
-    // stage becomes the session's setup error.
-    // PR-2: AgentAdapter will own install/auth/start/prompt/monitor/output/
-    // stopWork/stopExec — this inline launch is that seam's PR-1 stand-in.
+    // START stands the worker up (env-create + clone + setup), then the agent
+    // adapter drives the agent's launch on the fresh Compute surface: make the
+    // CLI present (install), make creds present (auth), launch it (start) with
+    // the command it composes from the provider's LaunchSpec — the brief rides
+    // that launch argv, so no separate prompt is needed at provision. A failure
+    // at any stage becomes the session's setup error.
     let started = (|| -> anyhow::Result<crate::backend::Provision> {
         let p = backend.start(&req)?;
-        if let Some(cmd) = backend.agent_launch_cmd(&req) {
-            backend.compute(&p.handle)?.spawn(&cmd)?;
+        if let Some(launch) = backend.launch_spec(&req) {
+            let compute = backend.compute(&p.handle)?;
+            adapter.install(&*compute)?;
+            adapter.auth(&*compute)?;
+            adapter.start(&*compute, &launch)?;
         }
         Ok(p)
     })();
@@ -686,6 +745,7 @@ fn provision_worker(
                 &observers,
                 observe_interval,
                 backend,
+                adapter,
                 &uid,
                 p.handle,
                 policy,
@@ -811,6 +871,11 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                 );
             }
         }
+        // The agent adapter is selected by the resolved `agent`, the way the
+        // backend is selected by env-kind. Running a worker needs BOTH: an env
+        // to stand up and an adapter to drive the agent on it.
+        let adapter = self.adapter_for(&agent);
+        let runnable = backend.is_some() && adapter.is_some();
 
         let dispatch = DispatchRow {
             id: Uuid::now_v7().to_string(),
@@ -832,17 +897,19 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             exit_detail: None,
             reaped_at: None,
         };
-        let accepted = if backend.is_some() {
+        let accepted = if runnable {
             "dispatch accepted; provisioning a worker"
-        } else {
+        } else if backend.is_none() {
             "dispatch accepted; queued (no live env backend)"
+        } else {
+            "dispatch accepted; queued (no adapter for the agent)"
         };
         let event = ledger.push_event(
             &session.uid,
             "log",
             json!({"kind": "log", "payload": {"line": accepted}}),
         );
-        let provision = backend.is_some().then(|| StartRequest {
+        let provision = runnable.then(|| StartRequest {
             session_uid: session.uid.clone(),
             template: dispatch.spec.template.clone(),
             repo: dispatch.spec.repo.clone(),
@@ -867,12 +934,12 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         ledger.mirror(mutations)?;
         drop(ledger);
 
-        if let (Some(req), Some(backend)) = (provision, backend) {
+        if let (Some(req), Some(backend), Some(adapter)) = (provision, backend, adapter) {
             let ledger = Arc::clone(&self.ledger);
             let observers = Arc::clone(&self.observers);
             let interval = self.observe_interval;
             std::thread::spawn(move || {
-                provision_worker(ledger, backend, req, observers, interval, policy)
+                provision_worker(ledger, backend, adapter, req, observers, interval, policy)
             });
         }
         Ok(session)
@@ -987,24 +1054,26 @@ impl crate::mcp_generated::DisponentMcp for Engine {
     }
 
     fn send(&self, session_uid: String, input: String) -> anyhow::Result<()> {
-        let (state, handle, backend) = {
+        let (state, handle, backend, adapter) = {
             let mut ledger = self.ledger.lock().unwrap();
-            let kind = ledger.env_kind_of(&session_uid);
+            let (backend, adapter) = self.routing(&ledger, &session_uid);
             let session = ledger.session_mut(&session_uid)?;
             (
                 session.state.clone(),
                 session.env_handle.clone(),
-                kind.and_then(|k| self.backend_for(&k)),
+                backend,
+                adapter,
             )
         };
         if state != "running" {
             bail!("can't send to session {session_uid}: state is {state}, not running");
         }
-        let (Some(backend), Some(handle)) = (backend, handle) else {
+        let (Some(backend), Some(handle), Some(adapter)) = (backend, handle, adapter) else {
             bail!("session {session_uid} has no reachable worker");
         };
-        // The env round-trip happens outside the ledger lock; the event records after.
-        backend.compute(&handle)?.send(&input)?;
+        // The env round-trip happens outside the ledger lock; the event records
+        // after. The adapter delivers the follow-up (its `prompt`).
+        adapter.prompt(&*backend.compute(&handle)?, &input)?;
         let mut ledger = self.ledger.lock().unwrap();
         let event = ledger.push_event(
             &session_uid,
@@ -1017,20 +1086,22 @@ impl crate::mcp_generated::DisponentMcp for Engine {
 
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session> {
         let mut ledger = self.ledger.lock().unwrap();
-        let kind = ledger.env_kind_of(&session_uid);
+        let (backend, adapter) = self.routing(&ledger, &session_uid);
         let session = ledger.session_mut(&session_uid)?;
         let state = session.state.clone();
         if TERMINAL.contains(&state.as_str()) {
             bail!("session {session_uid} is already {state}");
         }
         // Stop the agent but keep the environment for inspection — reap deletes
-        // it. Graceful-then-hard: interrupt the running work (stop_work), then
-        // kill the process (stop_exec); the env stays either way.
-        let backend = kind.and_then(|k| self.backend_for(&k));
-        if let (Some(backend), Some(handle)) = (backend, session.env_handle.clone()) {
+        // it. Graceful-then-hard: the adapter interrupts the running work
+        // (stop_work), then kills the process (stop_exec); the env stays either
+        // way.
+        if let (Some(backend), Some(adapter), Some(handle)) =
+            (backend, adapter, session.env_handle.clone())
+        {
             let stop = backend.compute(&handle).and_then(|c| {
-                c.stop_work()?;
-                c.stop_exec()
+                adapter.stop_work(&*c)?;
+                adapter.stop_exec(&*c)
             });
             if let Err(e) = stop {
                 let ev = ledger.push_event(
@@ -1056,12 +1127,11 @@ impl crate::mcp_generated::DisponentMcp for Engine {
 
     fn reap(&self, session_uid: String) -> anyhow::Result<Session> {
         let mut ledger = self.ledger.lock().unwrap();
-        let kind = ledger.env_kind_of(&session_uid);
+        let (backend, adapter) = self.routing(&ledger, &session_uid);
         let session = ledger.session_mut(&session_uid)?;
         if session.reaped_at.is_some() {
             bail!("session {session_uid} is already reaped");
         }
-        let backend = kind.and_then(|k| self.backend_for(&k));
         let handle = session.env_handle.clone();
         let live = !TERMINAL.contains(&session.state.as_str());
 
@@ -1082,8 +1152,8 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         // stopped (cancel/lost), so skip stop_exec there.
         if let (Some(backend), Some(handle)) = (backend.as_ref(), handle.as_ref()) {
             if live {
-                if let Ok(compute) = backend.compute(handle) {
-                    let _ = compute.stop_exec();
+                if let (Ok(compute), Some(adapter)) = (backend.compute(handle), adapter.as_ref()) {
+                    let _ = adapter.stop_exec(&*compute);
                 }
             }
             backend
@@ -1258,13 +1328,18 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                 mutations.push(event_mutation(&event));
                 ledger.dispatches.push(dispatch);
                 ledger.sessions.push(session);
-                if let Some(backend) = self.backend_for(kind) {
+                if let (Some(backend), Some(adapter)) =
+                    (self.backend_for(kind), self.adapter_for("claude-code"))
+                {
                     // An adopted worker carries no dispatch limits we can trust;
-                    // policy is logged/stored only in PR-1, so a default is honest.
+                    // policy is logged/stored only in PR-1, so a default is
+                    // honest. Adoption assumes the claude-code agent (as the
+                    // adopted dispatch row records).
                     watch_session(
                         &self.observers,
                         self.observe_interval,
                         backend,
+                        adapter,
                         session_uid,
                         handle.clone(),
                         LifecyclePolicy::default(),

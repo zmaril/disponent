@@ -6,6 +6,7 @@
 //! skeleton: the shipped catalog, the in-memory ledger, and the generated MCP
 //! surface — env backends land in phase 3.
 
+pub mod agent;
 pub mod backend;
 pub mod catalog;
 pub mod engine;
