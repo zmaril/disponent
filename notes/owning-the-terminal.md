@@ -303,6 +303,40 @@ single-attacher `Busy` model is baked into a coarse `inner` mutex
 (`server.rs:427`), not a config flag — and it is the exact model disponent's
 observe-only worker role must *not* have.
 
+### The restore emulator — which crate, and where ghostty fits
+
+The screen-restore engine (item 1) is the one piece worth *buying* rather than
+writing, so the choice of crate matters. Four candidates, all for the same job —
+parse the pty byte stream into a screen model and dump the current screen back
+out as escape sequences on reattach:
+
+| Crate | Lang | Screen model | Repaint (dump→escapes) | Build cost in a Rust musl static binary |
+|---|---|---|---|---|
+| **`shpool_vt100`** | Rust | yes | **yes** — `contents_formatted()` | one `Cargo.toml` line; cross-compiles with everything else |
+| `alacritty_terminal` | Rust | yes (grid + damage) | no built-in serializer (render-oriented) | cargo-native, but you'd write the dump-to-escapes yourself |
+| `vte` | Rust | no (parser only) | no | cargo-native, but only the primitive under the others |
+| **`libghostty-vt`** | **Zig** | yes | **yes, richer** — a `Formatter` with a `VT` mode that restores cursor, SGR, OSC-8 links, palette, modes, scrolling region, tabstops, pwd | Zig 0.15.x toolchain + C-FFI + a *second* static lib to cross-compile to musl |
+
+**ghostty is the higher-fidelity engine** — SIMD parser, broad Unicode coverage, fuzz/Valgrind-tested, and its formatter's `VT` mode emits a *more* complete restore stream than `vt100`'s (it replays modes, palette, and the scrolling region, which vt100 doesn't). `libghostty-vt` is real today — MIT, a committed C ABI (`include/ghostty/vt.h` + a `Formatter` API) and a `libghostty-vt.a` static-lib target, with Rust bindings already on crates.io (`libghostty-vt` / `libghostty-vt-sys`). It does exactly the parse→state→repaint round-trip this holder needs; the formatter is a superset of `contents_formatted()`. Caveat: the C ABI is still pre-1.0 ("breaking changes expected").
+
+The cost is entirely on disponent's build axis — and that is the axis §5's
+one-static-binary-to-the-VM story turns on. `libghostty-vt-sys` shells out to
+`zig build`, so adopting it drags a **Zig 0.15.x toolchain onto every build
+host**, an **FFI seam**, a **second static lib to cross-compile to musl** (Zig is
+good at musl, but threading the Cargo target triple through to `zig build
+--target …musl` is unproven here), and a **pre-1.0 C ABI pinned to a Ghostty
+commit** to track. That is a lot to carry for the *deferrable, human-only* half
+of the design (M3, §9) — the exact-frame and exit-status wins (§4) need no
+emulator at all.
+
+**Call:** start on `shpool_vt100` — pure Rust, MIT, free musl cross-compile, and
+the exact mechanism shpool uses for reattach-repaint. Treat the emulator as a
+**swappable engine behind the restore-buffer seam**, not a foundation: because
+the seam is just "feed bytes, ask for a repaint," `libghostty-vt` can slot in
+later — worth it if repaint fidelity ever becomes limiting (full-screen agent
+TUIs leaning hard on palette/modes) or once it ships a stable tag — without
+touching the rest of the holder.
+
 ## 8. The hybrid — shpool for persistence, disponent for attach/send
 
 A real contender on paper: let shpool hold the pty, let disponent do
@@ -335,7 +369,7 @@ shippable behind a flag.
 | **M0 — skeleton holder** | `disponent hold` subcommand: `shpool_pty` openpty + exec, unix socket, 1 reader byte-shuttle, `waitpid` → Exit frame. Local only. | S–M | exact-frame stream + real exit code, behind a flag |
 | **M1 — engine integration** | Widen `EnvBackend` with a streaming `observe`/`attach` (byte channel + exit); `LocalTmux` gains a `dsp-hold` sibling; observer records `raw` frames as `exact`; `wait()` resolves on real completion; `send` → writer connection. | M | fidelity + exit-status wins land in the ledger |
 | **M2 — writer lock + multi-reader + pm** | N readers, 1 writer lock; `disponent attach` CLI (termios RAII from shpool's pattern); pm `/pty` dials the socket (reworks pm#162). | M | humans + pm on the holder; tmux no longer on the local attach path |
-| **M3 — human screen restore** | Pull in `shpool_vt100`; `--restore` repaint + resize jiggle for `disponent attach` and pm. | M (mostly integration) | clean full-screen-app reattach |
+| **M3 — human screen restore** | Pull in `shpool_vt100` (swappable for `libghostty-vt` — see §7); `--restore` repaint + resize jiggle for `disponent attach` and pm. | M (mostly integration) | clean full-screen-app reattach |
 | **M4 — remote** | Ship the static `disponent` build to the VM at provision; bootstrap launches `disponent hold` instead of tmux; attach over `ssh <vm> disponent hold-attach`; ttyd points at the holder. | M–L | tmux gone remotely too |
 
 **The genuinely hard parts, called out:**
