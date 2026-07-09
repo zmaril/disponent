@@ -7,8 +7,9 @@
 //! * [`EnvProvider`] owns *where* a process runs: it can create a base image
 //!   (TEMPLATE), stand up a worker with a running shell (START), destroy it
 //!   (REAP), and answer "what's out there" for reconcile. START does **not**
-//!   launch the agent — that is an explicit engine step (PR-1) and will become
-//!   an `AgentAdapter` (PR-2).
+//!   launch the agent — the [`AgentAdapter`](crate::agent::AgentAdapter) does
+//!   that on the [`Compute`] surface, composing its command from the provider's
+//!   [`launch_spec`](EnvProvider::launch_spec).
 //! * [`Compute`] is the INTERACT surface a running worker exposes — run a
 //!   one-shot command, spawn the long-running agent, type at it, scrape its
 //!   pane, interrupt it, kill it. Obtained from the provider given the worker's
@@ -103,20 +104,23 @@ pub trait EnvProvider: Send + Sync {
     }
 
     /// START stage: env-create + clone + env-level setup, leaving a running
-    /// shell. Does **not** launch the agent — the engine does that as an
-    /// explicit step on the [`Compute`] surface (`agent_launch_cmd`).
+    /// shell. Does **not** launch the agent — the [`AgentAdapter`] does that on
+    /// the [`Compute`] surface, composing its command from [`launch_spec`].
+    ///
+    /// [`AgentAdapter`]: crate::agent::AgentAdapter
+    /// [`launch_spec`]: EnvProvider::launch_spec
     fn start(&self, req: &StartRequest) -> anyhow::Result<Provision>;
 
     /// The INTERACT ([`Compute`]) surface for an existing worker, addressed by
     /// its opaque handle. send/capture/stop all go through this.
     fn compute(&self, handle: &serde_json::Value) -> anyhow::Result<Box<dyn Compute>>;
 
-    /// The command the engine spawns on the fresh shell to launch the agent.
-    /// PR-1 keeps this a backend-built string the engine runs verbatim right
-    /// after START; PR-2's `AgentAdapter` will own install/auth/start/prompt/
-    /// monitor/output/stopWork/stopExec. `None` = a pure-shell env with no
+    /// The env's agent-launch config: the agent binary + baseline flags and
+    /// where START put the brief. The [`AgentAdapter`](crate::agent::AgentAdapter)
+    /// composes the actual command from this and `Compute::spawn`s it, so the
+    /// env re-hardcodes no agent command. `None` = a pure-shell env with no
     /// agent to launch.
-    fn agent_launch_cmd(&self, _req: &StartRequest) -> Option<String> {
+    fn launch_spec(&self, _req: &StartRequest) -> Option<crate::agent::LaunchSpec> {
         None
     }
 
@@ -142,9 +146,10 @@ pub trait EnvProvider: Send + Sync {
     }
 }
 
-/// The INTERACT stage a running env exposes. In PR-1 the engine drives it
-/// directly (agent launch is a hardcoded engine step, `spawn`ed here); PR-2
-/// will move that behind an `AgentAdapter`.
+/// The INTERACT stage a running env exposes: the raw primitives an
+/// [`AgentAdapter`](crate::agent::AgentAdapter) drives an agent CLI with. The
+/// adapter composes the launch command and the stop verbs; `Compute` just
+/// lands them (keystrokes in a local pane, a bootstrap on a remote worker).
 ///
 /// `Send` so a terminal watcher can hold one on its observer thread.
 pub trait Compute: Send {
@@ -162,12 +167,14 @@ pub trait Compute: Send {
     fn capture(&self) -> anyhow::Result<String>;
 
     /// Interrupt the running process (e.g. `C-c`) — the process STAYS alive
-    /// (its shell returns to a prompt); the env is untouched.
-    fn stop_work(&self) -> anyhow::Result<()>;
+    /// (its shell returns to a prompt); the env is untouched. The raw primitive
+    /// the agent adapter's `stop_work` delegates to.
+    fn interrupt(&self) -> anyhow::Result<()>;
 
     /// Kill the running process (was `EnvBackend::stop`'s effect) — the env
-    /// stays for inspection; REAP is what destroys it.
-    fn stop_exec(&self) -> anyhow::Result<()>;
+    /// stays for inspection; REAP is what destroys it. The raw primitive the
+    /// agent adapter's `stop_exec` delegates to.
+    fn kill(&self) -> anyhow::Result<()>;
 
     /// An editor deep-link into this session's working directory, if the env
     /// can honestly provide one for the caller's machine. `None` = no honest
@@ -194,8 +201,16 @@ impl EnvProvider for ExeDev {
     fn start(&self, req: &StartRequest) -> anyhow::Result<Provision> {
         // (inherent method — resolution prefers it over this trait method)
         let p = ExeDev::start(self, req)?;
+        // The worker's OTLP env is resolved here, at START, where the session
+        // uid is known, and stashed on the handle so `ExeCompute::spawn` can
+        // bake it into the run script when the adapter launches the agent.
+        let otel = req
+            .otel_endpoint
+            .as_deref()
+            .map(|e| crate::otel::worker_env(e, &req.session_uid))
+            .unwrap_or_default();
         Ok(Provision {
-            handle: serde_json::json!({"vmName": p.vm_name, "host": p.host}),
+            handle: serde_json::json!({"vmName": p.vm_name, "host": p.host, "otel": otel}),
             url: Some(p.url),
         })
     }
@@ -207,12 +222,16 @@ impl EnvProvider for ExeDev {
         }))
     }
 
-    fn agent_launch_cmd(&self, req: &StartRequest) -> Option<String> {
-        // PR-2: AgentAdapter will own install/auth/start/prompt/monitor/output/
-        // stopWork/stopExec. For now the launch is a remote bootstrap the engine
-        // `spawn`s onto the started worker — it writes the run script, opens the
-        // agent in a detached `worker` tmux session, and exposes it over ttyd.
-        Some(launch_script(self, req))
+    fn launch_spec(&self, _req: &StartRequest) -> Option<crate::agent::LaunchSpec> {
+        // The claude-code adapter composes the command; the env only supplies
+        // its config: the agent binary + its baseline flags, and where START
+        // put the brief (read at run time so a large brief never rides the
+        // command string). The tmux-over-ttyd worker bootstrap that wraps the
+        // command lives in `ExeCompute::spawn`.
+        Some(crate::agent::LaunchSpec {
+            agent_cmd: format!("claude {}", self.claude_flags),
+            brief_ref: "\"$(cat /tmp/disponent-brief.md)\"".to_string(),
+        })
     }
 
     fn reap(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
@@ -263,9 +282,14 @@ impl Compute for ExeCompute {
         if self.dev.dry_run {
             return Ok(());
         }
-        // The launch rides `bash -s` on the worker (it's the remote bootstrap).
+        // `cmd` is the adapter's composed agent command line; this env lands it
+        // by writing a run script that execs it, opening a detached `worker`
+        // tmux session on it, and exposing that over ttyd — the remote pane the
+        // agent lives in. The OTLP env was stashed on the handle at START.
+        let otel = self.handle["otel"].as_str().unwrap_or_default();
+        let script = worker_bootstrap(cmd, self.dev.ttyd_port, otel);
         self.dev
-            .worker(&self.host()?, &["bash", "-s"], Some(cmd))
+            .worker(&self.host()?, &["bash", "-s"], Some(&script))
             .map(|_| ())
     }
 
@@ -277,14 +301,14 @@ impl Compute for ExeCompute {
         ExeDev::capture(&self.dev, &self.host()?)
     }
 
-    fn stop_work(&self) -> anyhow::Result<()> {
+    fn interrupt(&self) -> anyhow::Result<()> {
         // Interrupt the agent in its pane; the pane (and VM) stay.
         self.dev
             .worker_tmux(&self.host()?, &["send-keys", "-t", "worker", "C-c"])
             .map(|_| ())
     }
 
-    fn stop_exec(&self) -> anyhow::Result<()> {
+    fn kill(&self) -> anyhow::Result<()> {
         ExeDev::stop(&self.dev, &self.host()?)
     }
 
@@ -615,22 +639,18 @@ cd "$work"
     format!("{header}\n{body}\n# ── dispatch setup ──\n{setup}\n")
 }
 
-/// The remote `bash -s` script that launches the agent on an already-started
-/// worker: write the run script, open the agent in a detached `worker` tmux
-/// session (the brief is `cat`-ed at run time so it never rides a tmux command
-/// string), and expose it over ttyd. The engine `spawn`s this after START.
-///
-/// PR-2: this is the exe.dev slice of what `AgentAdapter` will own.
-pub fn launch_script(backend: &ExeDev, req: &StartRequest) -> String {
-    let otel_block = req
-        .otel_endpoint
-        .as_deref()
-        .map(|e| crate::otel::worker_env(e, &req.session_uid))
-        .unwrap_or_default();
+/// The remote `bash -s` bootstrap that lands a composed agent command in a
+/// worker pane: write a run script that execs `agent_cmd`, open it in a detached
+/// `worker` tmux session, and expose that over ttyd. `ExeCompute::spawn` builds
+/// and runs this when the `claude-code` adapter launches — the exe.dev slice of
+/// "how a Compute surface starts an agent". `agent_cmd` already carries the
+/// brief reference (`"$(cat …)"`), so the brief is read at run time and never
+/// rides the tmux command string.
+pub fn worker_bootstrap(agent_cmd: &str, ttyd_port: u16, otel_block: &str) -> String {
     let header = [
-        format!("CLAUDE_FLAGS={}", shq(&backend.claude_flags)),
-        format!("TTYD_PORT={}", shq(&backend.ttyd_port.to_string())),
-        format!("OTEL_BLOCK={}", shq(&otel_block)),
+        format!("CLAUDE_CMD={}", shq(agent_cmd)),
+        format!("TTYD_PORT={}", shq(&ttyd_port.to_string())),
+        format!("OTEL_BLOCK={}", shq(otel_block)),
     ]
     .join("\n");
     let body = r#"
@@ -642,7 +662,7 @@ work="$HOME/work/task"
   echo 'export PATH="$HOME/.bun/bin:$PATH"'
   echo 'cd "$1"'
   echo "$OTEL_BLOCK"
-  echo "claude $CLAUDE_FLAGS \"\$(cat /tmp/disponent-brief.md)\" || true"
+  echo "$CLAUDE_CMD || true"
   echo 'exec bash'
 } > "$HOME/disponent-run.sh"
 chmod +x "$HOME/disponent-run.sh"
@@ -752,19 +772,34 @@ mod tests {
     }
 
     #[test]
-    fn launch_opens_the_agent_after_setup() {
-        let b = ExeDev::dry_run();
-        let s = launch_script(&b, &req(Some("zmaril/entl"), Some("cargo build")));
+    fn bootstrap_opens_the_agent_after_setup() {
+        // The adapter composes the command; the env wraps it in the pane
+        // bootstrap. The composed line carries the brief reference.
+        let agent_cmd = "claude --dangerously-skip-permissions \"$(cat /tmp/disponent-brief.md)\"";
+        let s = worker_bootstrap(agent_cmd, 7681, "");
         let pos = |needle: &str| {
             s.find(needle)
                 .unwrap_or_else(|| panic!("{needle} in script"))
         };
-        // the launch cats the brief into the run script, then opens the worker
+        // the composed command (with its brief cat) is wired into the run
+        // script before the worker tmux session opens
         assert!(
             pos("cat /tmp/disponent-brief.md") < pos("tmux -L disponent new-session"),
             "brief wired before the tmux session"
         );
         assert!(s.contains("ttyd"));
+    }
+
+    #[test]
+    fn launch_spec_carries_the_brief_reference() {
+        // The env supplies the agent binary + flags and the brief location; the
+        // adapter composes them. exe.dev reads the brief START pushed to /tmp.
+        let b = ExeDev::dry_run();
+        let spec = EnvProvider::launch_spec(&b, &req(Some("zmaril/entl"), None)).unwrap();
+        assert_eq!(
+            spec.command(),
+            "claude --dangerously-skip-permissions \"$(cat /tmp/disponent-brief.md)\""
+        );
     }
 
     #[test]

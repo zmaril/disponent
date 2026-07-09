@@ -1,11 +1,11 @@
 //! The local backend: run the agent on this machine, in tmux — the same
 //! shape as an exe.dev worker but the "environment" is a managed work dir
 //! plus a `tmux -L disponent` session named after the session uid. START sets
-//! the work dir up and opens a shell; the engine then launches the agent into
-//! that shell (its [`Compute`] surface). `stop_work` interrupts the agent,
-//! `stop_exec` kills the tmux session and keeps the work dir for inspection;
-//! REAP removes the work dir too. Survey lists the tmux sessions, so reconcile
-//! adopts local runs a previous disponent left behind.
+//! the work dir up and opens a shell; the [`AgentAdapter`](crate::agent::AgentAdapter)
+//! then launches the agent into that shell (its [`Compute`] surface).
+//! `interrupt` stops the agent's work, `kill` ends the tmux session and keeps
+//! the work dir for inspection; REAP removes the work dir too. Survey lists the
+//! tmux sessions, so reconcile adopts local runs a previous disponent left behind.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -255,12 +255,15 @@ impl EnvProvider for LocalTmux {
         }))
     }
 
-    fn agent_launch_cmd(&self, _req: &StartRequest) -> Option<String> {
-        // PR-2: AgentAdapter will own install/auth/start/prompt/monitor/output/
-        // stopWork/stopExec. For now the launch is the same line the runner used
-        // to bake in — the agent with the brief `cat`-ed from the work dir — and
-        // the engine `spawn`s it (as keystrokes) into the shell START opened.
-        Some(format!("{} \"$(cat ../brief.md)\"", self.agent_cmd))
+    fn launch_spec(&self, _req: &StartRequest) -> Option<crate::agent::LaunchSpec> {
+        // The claude-code adapter composes the command; the env supplies its
+        // config — the agent command line and where START wrote the brief. The
+        // adapter's launch is `spawn`ed (as keystrokes) into the shell START
+        // opened, with the brief `cat`-ed from the work dir at run time.
+        Some(crate::agent::LaunchSpec {
+            agent_cmd: self.agent_cmd.clone(),
+            brief_ref: "\"$(cat ../brief.md)\"".to_string(),
+        })
     }
 
     fn reap(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
@@ -420,7 +423,7 @@ impl Compute for LocalCompute {
         LocalTmux::capture(&self.dev, &self.handle)
     }
 
-    fn stop_work(&self) -> anyhow::Result<()> {
+    fn interrupt(&self) -> anyhow::Result<()> {
         if self.dev.dry_run {
             return Ok(());
         }
@@ -430,7 +433,7 @@ impl Compute for LocalCompute {
         self.dev.tmux(&["send-keys", "-t", name, "C-c"]).map(|_| ())
     }
 
-    fn stop_exec(&self) -> anyhow::Result<()> {
+    fn kill(&self) -> anyhow::Result<()> {
         if self.dev.dry_run {
             return Ok(());
         }
@@ -474,9 +477,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_launch_cats_the_brief() {
-        // The engine spawns this onto the shell START opened; it must carry the
-        // brief in from the work dir, not on the tmux command string.
+    fn launch_spec_cats_the_brief() {
+        // The adapter spawns the composed command onto the shell START opened;
+        // it must carry the brief in from the work dir, not on the tmux command
+        // string. The env supplies the agent command + brief location.
         let b = LocalTmux::sandboxed("s", PathBuf::from("/tmp/x"), "myagent --flag");
         let req = StartRequest {
             session_uid: "u".into(),
@@ -489,7 +493,7 @@ mod tests {
             otel_endpoint: None,
         };
         assert_eq!(
-            b.agent_launch_cmd(&req).unwrap(),
+            b.launch_spec(&req).unwrap().command(),
             "myagent --flag \"$(cat ../brief.md)\""
         );
     }
