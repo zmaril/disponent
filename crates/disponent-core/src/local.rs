@@ -493,6 +493,32 @@ impl EnvProvider for LocalTmux {
     }
 }
 
+/// The agent's working directory (`<workDir>/task`) from a session handle — the
+/// shared task-dir resolution for one-shot `run`, used by both the tmux and
+/// holder backends.
+fn task_dir(handle: &serde_json::Value) -> anyhow::Result<PathBuf> {
+    handle
+        .get("workDir")
+        .and_then(|d| d.as_str())
+        .map(|d| PathBuf::from(d).join("task"))
+        .ok_or_else(|| anyhow!("handle has no 'workDir': {}", handle))
+}
+
+/// Run a one-shot `bash -c <cmd>` in `task` (the agent's working directory),
+/// returning trimmed stdout — the shared `run` mechanism for both backends.
+fn run_oneshot(task: &Path, cmd: &str) -> anyhow::Result<String> {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(task)
+        .output()
+        .map_err(|e| anyhow!("run: spawn bash: {e}"))?;
+    if !out.status.success() {
+        bail!("run: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// The INTERACT surface for one local worker: a clone of the backend config
 /// plus the worker's handle (its `tmux` session name + `workDir`).
 struct LocalCompute {
@@ -527,27 +553,13 @@ impl Compute for LocalCompute {
             return Ok(String::new());
         }
         // One-shot in the session's task dir (the agent's working directory).
-        let task = self
-            .handle
-            .get("workDir")
-            .and_then(|d| d.as_str())
-            .map(|d| PathBuf::from(d).join("task"))
-            .ok_or_else(|| anyhow!("handle has no 'workDir': {}", self.handle))?;
-        let out = Command::new("bash")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(&task)
-            .output()
-            .map_err(|e| anyhow!("run: spawn bash: {e}"))?;
-        if !out.status.success() {
-            bail!("run: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let task = task_dir(&self.handle)?;
+        run_oneshot(&task, cmd)
     }
 
     fn spawn(&self, cmd: &str) -> anyhow::Result<()> {
         // Launch the agent as a foreground process in the pane's shell.
-        self.send_line(cmd)
+        self.send_line(cmd) // straitjacket-allow:duplication — parallel Compute trait impls; transport differs, boilerplate intentionally mirrors HolderCompute
     }
 
     fn send(&self, input: &str) -> anyhow::Result<()> {
@@ -613,11 +625,7 @@ impl HolderCompute {
 
     /// The agent's working directory (`<workDir>/task`), for one-shot `run`.
     fn task_dir(&self) -> anyhow::Result<PathBuf> {
-        self.handle
-            .get("workDir")
-            .and_then(|d| d.as_str())
-            .map(|d| PathBuf::from(d).join("task"))
-            .ok_or_else(|| anyhow!("handle has no 'workDir': {}", self.handle))
+        task_dir(&self.handle)
     }
 
     /// Write a line to the held shell + newline — the holder analogue of tmux
@@ -641,16 +649,7 @@ impl Compute for HolderCompute {
         // One-shot in the session's task dir — independent of the held pty,
         // exactly as the tmux path's `run` shells out to bash.
         let task = self.task_dir()?;
-        let out = Command::new("bash")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(&task)
-            .output()
-            .map_err(|e| anyhow!("run: spawn bash: {e}"))?;
-        if !out.status.success() {
-            bail!("run: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        run_oneshot(&task, cmd)
     }
 
     fn spawn(&self, cmd: &str) -> anyhow::Result<()> {
@@ -836,16 +835,12 @@ mod tests {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     fn scratch_dir() -> PathBuf {
+        // Unique per call: pid keeps it distinct across test binaries, the atomic
+        // counter across calls within one. (Deliberately terser than
+        // disponent-hold's roundtrip `scratch_dir` — no shared cross-crate
+        // test-util is worth the plumbing for a two-line scaffold.)
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "dsp-m1-{}-{}-{}",
-            std::process::id(),
-            n,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = std::env::temp_dir().join(format!("dsp-m1-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
