@@ -1,5 +1,8 @@
+# Keep this file ASCII-only: rb_sys parses .cargo/config.toml as US-ASCII and
+# fails the ruby binding build on any non-ASCII byte.
+#
 # The fluessig dependency is a git pin; fetch it with the git CLI so ssh
-# url-rewrites (url.git@github.com:.insteadOf) and ssh-agent auth just work —
+# url-rewrites (url.git@github.com:.insteadOf) and ssh-agent auth just work --
 # cargo's builtin libgit2 fetcher can't use the agent.
 [net]
 git-fetch-with-cli = true
