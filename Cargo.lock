@@ -365,7 +365,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "fluessig"
 version = "0.1.0"
-source = "git+https://github.com/zmaril/fluessig?rev=97221eb14ecb19c7511d0d7886c92b8b56cecf64#97221eb14ecb19c7511d0d7886c92b8b56cecf64"
+source = "git+https://github.com/zmaril/fluessig?rev=5c65e8f70245fa1940ac9071cfc12916e149a9d3#5c65e8f70245fa1940ac9071cfc12916e149a9d3"
 dependencies = [
  "genco",
  "serde",
