@@ -1,23 +1,27 @@
 # disponent — manager↔worker communication
 
-*Draft 2, 2026-07-08. A design note, sibling to [design.md](./design.md) and
+*Draft 3, 2026-07-08. A design note, sibling to [design.md](./design.md) and
 [ai-dispatch-comparison.md](./ai-dispatch-comparison.md). It proposes two flows —
 a targeted directive channel down to workers, and a question channel up from
 workers — collapsed onto a **single symmetric message primitive**. Nothing here
 changes `schema/disponent.tsp` or any generated file yet; it is the argument for
-the schema change, written first. Draft 1 modelled the two flows with a zoo of
-ops (`notify`/`ask`/`answer`/`escalate`) and a separate `Question` entity; draft
-2 replaces all of that with one `Message` entity and one `send`, on the insight
-that **addressing does the security work**.*
+the schema change, written first. Draft 1 modelled the flows with a zoo of ops
+(`notify`/`ask`/`answer`/`escalate`) and a `Question` entity; draft 2 replaced
+all of that with one `Message` entity and one `send`. Draft 3 folds in the
+user's decisions: **tags** as the primary selection handle, a **fan-out id with
+topic-scoped latest-wins** so a thousand workers don't burn usage on superseded
+directives, **`ack` restored** alongside the read cursor, **pull-only** delivery
+(push is a non-goal), and a **relaxed** security framing (the real guard is
+no-dispatch, not anti-spoofing).*
 
 Read [design.md](./design.md) for the model this builds on: environments are the
 source of truth (§3), sessions run until reaped (§5), events carry a `fidelity`
 grade (§7), and the MCP surface is **role-scoped** — the Manager gets the full
 surface, workers observe only, so a dispatched agent cannot recurse (§10). (This
 note uses **Manager** for the supervising principal design §10 calls the
-"supervisor"; workers are unchanged.) The no-recursion invariant is the thing
-most at risk from letting workers talk back; §9 shows why the collapse preserves
-it *more* cleanly than draft 1 did.
+"supervisor"; workers are unchanged.) The one invariant to protect is
+no-recursion: a worker must never dispatch or spawn another agent. §9 shows why
+that survives letting workers talk back.
 
 ## 1. Motivation — the two flows
 
@@ -26,15 +30,15 @@ worker VMs over stdio MCP) cannot express today, both about *communication
 between the Manager and running workers*:
 
 **(a) Targeted preference fan-out (down).** The user tells the Manager a
-preference mid-flight — "use `bun`, not `npm`, everywhere" — and the Manager
-wants to hand that to a **selected subset** of the running workers (the ones
-touching package config), not broadcast it to the whole fleet and not restart
-anyone. Each selected worker picks the preference up **through its own MCP
-surface**, on an inbox it pulls on its own cadence. Today the only downward
-channel is `send(sessionUid, input)` — one session, a Manager-only write that
-shoves raw text at a prompt. There is no "these five sessions," no durable
-record the worker pulls when it chooses, and nothing a worker is allowed to read
-as a first-class message.
+preference mid-flight — "use `bun`, not `npm`, everywhere on projectA" — and the
+Manager wants to hand that to a **selected subset** of the running workers (the
+ones on projectA), not broadcast it to the whole fleet and not restart anyone.
+Each selected worker picks the preference up **through its own MCP surface**, on
+an inbox it pulls on its own cadence. Today the only downward channel is
+`send(sessionUid, input)` — one session, a Manager-only write that shoves raw
+text at a prompt. There is no "these five hundred sessions," no durable record
+the worker pulls when it chooses, and nothing a worker is allowed to read as a
+first-class message.
 
 **(b) Question escalation (up).** A worker hits an ambiguity it cannot resolve —
 "the migration will drop a column with data in it; proceed?" — and needs to
@@ -48,7 +52,7 @@ cannot say anything; it can only be watched.
 
 Both flows are the same act — **one principal putting a message in another's
 inbox** — seen from two directions. Draft 1 missed that and grew an op per
-direction and per verb. Draft 2 names the act once.
+direction and per verb. This design names the act once.
 
 ## 2. What exists today (grounding)
 
@@ -66,12 +70,16 @@ Quoting the shipped surface so the addition is an honest delta, not an invention
   EventPayload }`. `EventKind ∈ {state, message, tool_call, tool_result, log,
   usage, artifact, raw}`, `Fidelity ∈ {exact, derived, scraped}`, and
   `EventPayload` is the tagged union. **`afterIdx` is already a read cursor** —
-  §7 leans on this so the messaging channel needs no new read op and no ack.
+  §7 leans on it for delivery, so the channel needs no new read op (`ack` is a
+  small separate write, §7).
 - **`send` today.** `send(sessionUid: SessionUid, input: string): void` — a
   Manager-only write that injects text into one running session's prompt (the
-  `interact` capability). Draft 2 **generalizes this op** into the symmetric
-  message primitive (§3, §6); it stays the same name, gains addressing, and
-  delivers to an inbox instead of shoving at a prompt.
+  `interact` capability). This design **generalizes that op** into the symmetric
+  message primitive (§3, §6); it keeps the name, gains addressing, and delivers
+  to an inbox instead of shoving at a prompt.
+- **Labels today.** `Dispatch.labels: Json` is an opaque per-dispatch tag bag
+  (`DispatchSpec.labels` feeds it). There is **no** first-class tag field and no
+  session-level label; §4 adds `tags` as the flat, indexable selection handle.
 - **The role gate — the load-bearing detail.** Worker observe-only is enforced
   in exactly one place, `crates/disponent-cli/src/mcp_server.rs::tools_for`:
 
@@ -88,54 +96,55 @@ Quoting the shipped surface so the addition is an honest delta, not an invention
   **exactly the read-only tools**, one boolean per op. A worker-*writable* op is
   invisible under that gate — the constraint §5 solves.
 
-## 3. The collapse — one message, one send, addressing does the security work
+## 3. The collapse — one message, one send (plus a lightweight ack)
 
-The whole design is one entity and one op:
+The whole design is one entity and one primary op:
 
 - **One `Message` entity** (§4): a durable record of "who put what in whose
   inbox," anchored to a worker session's timeline so both parties pull it
   through the `events`/`wait` path they already have.
 - **One `send`** (§6), used by both roles, its behavior differentiated **only by
   who the sender's address book contains**:
-  - The **Manager** has the full view. It can `send` to any worker (a selected
-    subset — that is preference fan-out) and to the **user**.
+  - The **Manager** has the full view. It can `send` to any worker subset (by
+    tag — that is preference fan-out) and to the **user**.
   - A **worker** knows exactly one address: **its Manager**. The worker-role
-    server resolves the recipient to "the Manager of this bound session"
-    server-side; the worker supplies **no recipient at all**.
+    server fills the recipient in from the bound session; the worker supplies
+    **no recipient at all**.
+- **A lightweight `ack`** (§7): a worker's explicit "received/handled," which the
+  Manager can observe — the part that makes a fan-out to a thousand workers
+  legible.
 
 Every verb from draft 1 falls out of this with nothing added:
 
-| draft 1 | draft 2 |
+| draft 1 | now |
 |---|---|
-| `notify(target, body)` (fan-out) | Manager `send` to a worker subset |
+| `notify(target, body)` (fan-out) | Manager `send` to a tagged subset |
 | `ask(body)` (worker question) | worker `send` (→ its Manager) |
 | `answer(qid, body)` | Manager `send` to that worker |
 | `escalate(qid, note)` | Manager `send` to the **user** |
-| `Question` entity, `status`, `ack` op | a `Message`, its `inReplyTo`, and a read cursor |
+| `Question` entity + `status` enum | a `Message` + its `inReplyTo` chain |
 
 A "question" is a worker message to the Manager; "answering" is the Manager
 messaging back; "escalation" is the Manager messaging the user. Threading
 (`inReplyTo`) is the only structure needed to relate them, and pm reconstructs a
 question's life by walking the reply chain — no `status` machine, no dedicated
-entity.
-
-**Addressing does the security work.** A worker cannot express any destination
-but its Manager — it has no vocabulary for a sibling worker or the environment.
-So "workers can't message each other" and "workers can't recurse" are not
-policed at call time; they are **structural**, a property of what a worker can
-even say (§9).
+entity. (`ack` survives from draft 1 as a first-class op, §7 — the read cursor
+handles delivery, `ack` reports handling; the two are not redundant.)
 
 ## 4. Data model
 
-One new entity, one new enum, one new event variant — sketched in the
-`schema/disponent.tsp` conventions (`@entity @name(...)`, `@key`, `@fk(#[...])`,
-doc comments that flow to the docs site and MCP tool text). `Message` is a
-**control-plane** row; unlike `Session`, no environment backs it (§11).
+One new entity, one new enum, one new scalar, one new event variant, and a `tags`
+field on the existing `Dispatch` — sketched in the `schema/disponent.tsp`
+conventions (`@entity @name(...)`, `@key`, `@fk(#[...])`, doc comments that flow
+to the docs site and MCP tool text). `Message` is a **control-plane** row; unlike
+`Session`, no environment backs it (§11).
 
 ```typespec
 // ── scalars ──
 /** Disponent-minted message id (UUIDv7). */
 scalar MessageId extends string;
+/** Disponent-minted fan-out id (UUIDv7): one broadcast, shared by its N Messages. */
+scalar FanoutId extends string;
 
 // ── enums (wire values are the stored strings) ──
 /** The three principals a message can move between. */
@@ -171,7 +180,36 @@ model Message {
    * escalation of a worker's message). Null for an unsolicited directive.
    * Walking `inReplyTo` reconstructs a question's whole life — no status enum. */
   @fk(#["in_reply_to"]) inReplyTo?: Message;
+
+  /** One logical Manager broadcast → N Messages that all share this id. A
+   * single-recipient send still gets one (a fan-out of one). Counting acks over
+   * a `fanoutId` is how the Manager sees "N of M picked up the directive" (§7). */
+  fanoutId: FanoutId;
+
+  /** Supersession key. A newer fan-out carrying the same `topic` supersedes
+   * older same-topic messages in an inbox: a worker reading its inbox acts on
+   * the LATEST message per topic and skips the stale ones, so a thousand
+   * workers don't burn usage on a directive already overtaken (§7). Null =
+   * standalone, never superseded. */
+  topic?: string;
+
+  /** Stamped by the recipient's `ack` (§7): received/handled. Manager-observable.
+   * Null = delivered (readable on the feed) but not yet acknowledged. */
+  ackedAt?: utcDateTime;
 }
+```
+
+**Tags on sessions.** Selection (§8) addresses a fan-out by tag, so add a flat,
+indexable tag set to the immutable `Dispatch` (a session inherits its dispatch's
+tags). This is distinct from the pre-existing opaque `labels: Json`, which stays
+for arbitrary consumer metadata; `tags` are exactly what selection matches on.
+
+```typespec
+// added to model Dispatch (and DispatchSpec):
+/** Selection tags — the PRIMARY handle the Manager addresses a fan-out to (§8).
+ * A session inherits its dispatch's tags. Flat strings, indexable; distinct
+ * from the opaque `labels: Json`. */
+tags?: string[];
 ```
 
 No `Inbox`, `Subscription`, or `Question` entity: an inbox **is** a query over
@@ -199,14 +237,23 @@ union EventPayload {
   // … existing variants …
   mail: MailRef,
 }
-model MailRef { messageId: MessageId; sender: Party; recipient: Party; }
+/** Pointer + the fields a reader needs to triage without fetching the Message:
+ * direction (sender/recipient), the fan-out it belongs to, and its topic (so a
+ * worker can group by topic for latest-wins, §7). */
+model MailRef {
+  messageId: MessageId;
+  sender: Party;
+  recipient: Party;
+  fanoutId: FanoutId;
+  topic?: string;
+}
 ```
 
-The payload is a **pointer** (the id + direction), matching `ArtifactRef`; the
-`Message` row is the record, the `mail` event is the timeline breadcrumb the
-pull path reads. `EventKind.message` (an agent's own transcript line) and
-`EventKind.mail` (a control-plane message) stay distinct — one is observed,
-the other is minted. Fidelity of every `mail` event is `exact` (§11).
+The payload is a **pointer** (the id) plus the triage fields, matching
+`ArtifactRef`; the `Message` row is the record, the `mail` event is the timeline
+breadcrumb the pull path reads. `EventKind.message` (an agent's own transcript
+line) and `EventKind.mail` (a control-plane message) stay distinct — one is
+observed, the other is minted. Fidelity of every `mail` event is `exact` (§11).
 
 **Does the recipient know who it is from?** Yes, in two parts. The `mail` event
 surfaces the coarse `sender: Party` (`manager` / `worker` / `user`), and the
@@ -216,10 +263,9 @@ reads its inbox each `mail` event's anchor names **which** worker asked —
 exactly the uid it needs to answer or escalate correctly (§10). A worker's own
 inbox is the mirror image: every inbound message is `sender: manager` (there is
 one Manager, so the role alone identifies the sender — the field is present but
-constant), anchored to the worker's own session. So "who it is from" is always
-answerable: the role from `sender`, the identity from the anchor `session`.
+constant), anchored to the worker's own session.
 
-## 5. The role gate, refined — `@worker` gates exactly one op
+## 5. The role gate, refined — `@worker` gates exactly two ops
 
 The smallest possible change. Add one op-level decorator, `@worker`, meaning
 *"projected into the worker surface even though it is not read-only."* It lowers
@@ -232,38 +278,40 @@ alongside `readOnlyHint` / `destructiveHint`. The gate becomes:
             || t["annotations"]["workerHint"]   == json!(true))
 ```
 
-`@worker` is applied to **exactly one** op — `send` — and to nothing else, ever:
+`@worker` is applied to **exactly two** ops — `send` and `ack` — and to nothing
+else, ever:
 
 | op | `readOnly` | `worker` | `destructive` | worker sees it? |
 |---|---|---|---|---|
 | `dispatch` | | | | **no** |
-| `send` | | yes | | yes (the one write; recipient forced, §9) |
+| `send` | | yes | | yes (write; recipient defaulted to Manager, §9) |
+| `ack` | | yes | | yes (write; own inbox only, §9) |
 | `cancel`, `reap` | | | yes | **no** |
 | `resume` | | | | **no** |
 | `sessions`, `events`, `offerings` | yes | | | yes (observe / read inbox) |
 
-Compared to draft 1, the worker surface *shrinks*: draft 1 needed `ask` **and**
-`ack` on the worker surface; draft 2 needs just `send`, because reading is the
-existing `events`/`wait` (already `@readonly`, so already worker-visible) and
-there is no ack (§7). The no-recursion invariant becomes one checkable line:
-**`send` is the only `@worker` op, and it is not `@destructive` and not
-`dispatch`.**
+The worker surface stays tiny: two self-scoped writes (`send` up to its Manager,
+`ack` on its own inbox) plus the read-only observe tools it already had. Reading
+messages is the existing `events`/`wait` (already `@readonly`, already
+worker-visible) — no new read op. The no-recursion invariant becomes one
+checkable line: **`send` and `ack` are the only `@worker` ops, and neither is
+`@destructive` nor `dispatch`.**
 
 ## 6. Op surface
 
 `send` is generalized from today's `send(sessionUid, input): void` into the
-symmetric primitive. Nothing else is added — reading is the existing `events` /
-`wait`.
+symmetric primitive; `ack` is added. Reading is the existing `events` / `wait`.
 
 ```typespec
 /** Where a Manager-sent message goes. A worker never fills this (§9): the
- * worker-role server forces recipient = its Manager, anchored to the bound
+ * worker-role server defaults recipient = its Manager, anchored to the bound
  * session. A Manager sets exactly one destination. */
 model SendTarget {
-  /** Worker recipients by session uid — the selection primitive (§8). */
+  /** PRIMARY (§8): every live session whose dispatch carries any of these tags.
+   * `tags:["projectA"]` reaches all projectA workers without enumerating uids. */
+  tags?: string[];
+  /** Precise fallback: exact recipients by session uid. */
   sessions?: SessionUid[];
-  /** Sugar: a label predicate resolved to a session set at send time (§8). */
-  labelsMatch?: Json;
   /** Escalate to the human above the Manager, about this worker session (§10). */
   user?: SessionUid;
 }
@@ -271,15 +319,25 @@ model SendTarget {
 interface Disponent {
   // … unchanged ops …
 
-  /** The one messaging primitive, used by both roles. Addressing does the
-   * security work (§9):
-   *  - Manager: `to` names a worker subset (fan-out) or the user (escalation).
-   *  - worker:  `to` is IGNORED. The worker-role server forces recipient = the
-   *    Manager of the bound session, anchored to that session — the worker names
-   *    no one. `@worker` makes this the single write a worker gets.
-   * Returns the Message(s) minted — one per recipient on a fan-out. Read the
-   * other side via `events`/`wait` (§7); there is no separate deliver or ack. */
-  @worker send(to?: SendTarget, body: string, inReplyTo?: MessageId): Message[];
+  /** The one messaging primitive, used by both roles.
+   *  - Manager: `to` names a tagged worker subset (fan-out) or the user.
+   *  - worker:  `to` is filled in server-side — recipient = the Manager of the
+   *    bound session, anchored to that session; the worker names no one.
+   * A multi-recipient send mints one Message per matched session, all sharing a
+   * freshly minted `fanoutId`; `topic` (optional) is the supersession key for
+   * latest-wins (§7). Returns the Messages minted. Delivery is the reader's
+   * `events` pull; `ack` (below) is the recipient's acknowledgement. */
+  @worker send(
+    to?: SendTarget,
+    body: string,
+    inReplyTo?: MessageId,
+    topic?: string,
+  ): Message[];
+
+  /** Acknowledge a message you received (received/handled). Self-scoped: a
+   * worker acks only its own inbox (§9); stamps `ackedAt`, which the Manager
+   * observes across a `fanoutId` to see "N of M acted" (§7). Idempotent. */
+  @worker ack(messageId: MessageId): void;
 }
 ```
 
@@ -287,10 +345,10 @@ Reading, both roles, is unchanged tooling:
 
 - A **worker** reads its inbox with `events` — self-scoped to its bound session
   (§9), filtered `kinds: ["mail"]`, resuming from its `afterIdx` cursor; or
-  blocks on `wait`.
+  blocks on `wait`. It groups by `topic` for latest-wins (§7), then `ack`s.
 - The **Manager** reads worker→Manager mail with the same `events`, unrestricted
   (it already watches every session feed): `events(kinds: ["mail"])` across the
-  fleet, or `events(sessionUid: wk, kinds: ["mail"])` for one worker.
+  fleet. It watches a fan-out's progress by querying `messages` on `fanoutId`.
 
 `send`'s old prompt-injection meaning (push text at a live prompt via `interact`)
 is not lost — it becomes one possible *backend delivery* of a `mail` message on
@@ -299,37 +357,55 @@ an `interact`-capable env. But the **contract is pull**: `send` records a
 not promise to interrupt a running agent (design §7: "Disponent does not
 interpolate").
 
-## 7. Delivery — the read cursor replaces ack
+## 7. Delivery — read cursor, ack, and latest-wins
 
-Delivery is **pull-based**. `send` does not push into the recipient's tmux/PTY;
-it writes a `Message`, projects a `mail` event on the anchor session's timeline,
-and lets the reader pull it through `events`/`wait` on its own cadence. This
-keeps a worker a leaf that *reads a surface*, never a target disponent drives.
+Delivery is **pull-based, and it stays that way** (decided, §14.1): `send`
+writes a `Message` and projects a `mail` event; the recipient pulls it through
+`events`/`wait` on its own cadence. Disponent never pushes into a worker's
+tmux/PTY. If the Manager ever needs a worker to *stop* — flow control,
+backpressure — that is done by **pausing or stopping the worker's process**
+(`cancel`/`reap`, or a future pause), not by a push/backpressure channel.
+Push is a non-goal.
 
-Draft 1 had a separate `ack` op and an `ackedAt` column. Draft 2 **drops both**,
-because the event feed already carries the only cursor that matters:
+Two positions doing two different jobs:
 
-- **The cursor is `events(afterIdx)`.** Each `mail` event has a monotonic
-  `Event.idx` on its session timeline (the existing mechanism — messages need no
-  private sequence column). A reader resumes from the last `idx` it saw.
-- **At-least-once, idempotent by construction.** Reading is non-mutating: a
-  reader that reconnects and re-reads from an older `afterIdx` simply sees the
-  message again and moves its cursor forward. There is nothing to double-apply,
-  so no ack is needed to make re-delivery safe. *Every message is readable until
-  the reader advances past it; re-reading is free.* That is the whole guarantee,
-  and it is strictly simpler than an ack round-trip that a worker could forget to
-  send anyway.
+- **The read cursor — delivery.** Each `mail` event has a monotonic `Event.idx`
+  on its session timeline (the existing mechanism — messages need no private
+  sequence column). A reader resumes from the last `idx` it saw. This is
+  **at-least-once and idempotent by construction**: reading is non-mutating, so
+  a reader that reconnects and re-reads from an older `afterIdx` simply sees the
+  message again and advances. Nothing to double-apply; every message is readable
+  until the reader moves past it.
+- **`ack` — acknowledgement.** A worker calls `ack(messageId)` when it has
+  received/handled a message; that stamps `ackedAt`, which the **Manager can
+  observe** (the read cursor is private to the reader and invisible to the
+  Manager). This matters precisely at **fan-out scale**: after a directive to a
+  thousand workers, `messages WHERE fanoutId=F AND ackedAt IS NOT NULL` tells
+  the Manager how many have picked it up — a real progress view the cursor alone
+  cannot give. `ack` is a `@worker` op, self-scoped (a worker acks only its own
+  inbox), and idempotent.
+
+Restoring `ack` (draft 1 had it, draft 2 dropped it) is deliberate: the cursor
+guarantees *delivery*, `ack` reports *handling*. They are not redundant — one is
+the reader's business, the other is the Manager's.
+
+**Latest-wins — don't burn usage on stale directives.** A fan-out carries a
+`topic`. Within an inbox, a newer message on the same `topic` supersedes older
+ones: a worker reading its inbox groups `mail` by `topic` (surfaced on the event,
+no fetch needed) and acts only on the newest per topic, skipping the superseded.
+So when the Manager sends "use pnpm" and then "actually, use bun" to
+`tags:["projectA"]` with the same `topic:"package-manager"`, a worker that reads
+both acts once — on bun — and a thousand workers do not each act twice and waste
+a turn. Superseded messages are not deleted (the timeline is append-only); they
+are simply ignored by the read-side convention. (Scope of supersession is a
+genuine sub-question — see §14.7.)
+
 - **Ordering.** Per-inbox FIFO by `Event.idx` on the anchor timeline. No
-  cross-session order is promised: a fan-out to five workers is five independent
+  cross-session order is promised: a fan-out to N workers is N independent
   timeline appends.
-- **What is lost, honestly.** With no `ack`, the Manager gets no free
-  read-receipt — it cannot tell from the ledger whether a worker *pulled* a
-  directive. If it needs confirmation, that confirmation is **just another
-  message**: the worker `send`s "applied bun" back up, like anything else. We
-  do not build a bespoke ack channel for what the primitive already expresses.
 - **Wait-based reads (later).** The blocking analogue is the existing `@manual
   wait(sessionUid, timeoutSecs)`; a worker-scoped `wait` that returns on the
-  next `mail` event is the v1.1 nicety. Polling `events` on the observer cadence
+  next `mail` event is a v1.1 nicety. Polling `events` on the observer cadence
   covers the MVP.
 
 Fidelity of `mail` events is `exact` — they are records of disponent's own
@@ -337,68 +413,65 @@ first-party `send` calls, not observations of an environment inferred from a
 transcript (`derived`) or a tmux capture (`scraped`). No env mediates them, so
 `exact` is the truthful grade (§11).
 
-## 8. Selection targeting
+## 8. Selection targeting — tags first
 
-The Manager must name "these workers." Three candidate handles exist:
+The Manager addresses a fan-out by **tag**, with uid as the precise fallback:
 
-1. **By session uid** — `Session.uid`, the ledger's own key. Precise, unambiguous.
-2. **By label** — `Dispatch.labels: Json` is already the consumer's opaque tag
-   bag; a predicate over it ("touches package.json") is the natural selector.
-3. **By capability grade** — an env's `CapabilityKind` set. Too coarse for
-   *worker* selection (it describes the environment, not the task). Rejected as a
-   selector.
+1. **By tag (primary).** With a thousand agents tagged `projectA` and a thousand
+   `projectB`, `tags:["projectA"]` reaches the first group without enumerating a
+   thousand uids — enumeration is exactly the thing to avoid at fleet scale.
+   `SendTarget.tags` resolves at send time to `sessions WHERE dispatch.tags ⊇
+   predicate AND state ∈ live`.
+2. **By session uid (fallback).** `SendTarget.sessions` names exact recipients —
+   the precise handle for "just these three," and the ground the ledger records.
+3. **By capability grade — rejected.** An env's `CapabilityKind` set describes
+   the *environment*, not the task; too coarse to select workers. Not a selector.
 
-**Recommendation: session uid is the primitive; label match is sugar over it.**
-`SendTarget.sessions` is the ground truth the ledger records — one `Message` per
-uid, so the audit trail is always per-recipient. `SendTarget.labelsMatch` is
-resolved to a uid set **at send time** (`sessions WHERE labels ⊇ predicate AND
-state ∈ live`) and then behaves identically. The durable record is always the
-concrete recipient list, never a live predicate: a Manager sends to who was live
-*then*, frozen into the `Message` rows. Late-joining sessions do not
-retroactively receive an old directive — the honest, less-surprising semantics.
+Whichever handle is used, the durable record is the **concrete recipient list** —
+one `Message` per matched session, all sharing one `fanoutId` — frozen at send
+time. A tag predicate is resolved *then*, not kept live: late-joining sessions do
+not retroactively receive an old directive (honest, less-surprising semantics; a
+newer session gets the *next* fan-out, and topic-scoped latest-wins keeps it from
+acting on a stale one it never saw). Tags build on the `tags: string[]` added to
+`Dispatch`/`DispatchSpec` (§4), distinct from the opaque `labels: Json`.
 
-Worker send needs no targeting at all: its recipient is always its Manager (§9).
+Worker send needs no targeting: its recipient is always its Manager (§9).
 
-## 9. Security posture — addressing is the enforcement
+## 9. Security posture — the one guard is no-dispatch
 
 The invariant (design §10): *humans and Manager agents dispatch; dispatched
-agents are leaf nodes.* Draft 2 lets workers talk back, and preserves the
-invariant **through what a worker can address**, not through which write ops
-exist. What a compromised or adversarial worker can and cannot do:
+agents are leaf nodes.* This design lets workers talk back while keeping that
+one guarantee. What a compromised or adversarial worker can and cannot do:
 
 **CAN** (its whole surface): read its own sessions/events/offerings (today);
-read **its own** inbox (`events`, self-scoped, `kinds:["mail"]`); `send` exactly
-one thing — a message **to its Manager**.
+read **its own** inbox (`events`, self-scoped, `kinds:["mail"]`); `send` a
+message up to its Manager; `ack` a message in its own inbox.
 
-**CANNOT**: `dispatch` (spawn any session) — not on the worker surface; `send`
-to a **sibling worker** or the **environment** — it has no way to *name* one, and
-its recipient is server-forced (below); `send` to the **user** — only the
-Manager escalates; `cancel` / `reap` / `resume` — not on the surface; read
-another session's feed — `events` is self-scoped for a worker.
+**CANNOT**: `dispatch` or spawn any session — **not on the worker surface**;
+`cancel` / `reap` / `resume` — not on the surface. That is the load-bearing line.
 
-Two enforcement layers, both structural, neither trusting agent good behavior:
+Two layers, in priority order:
 
-1. **Tool projection (existing, extended by one bit).** The worker-role server
+1. **Tool projection — the real no-recursion guard.** The worker-role server
    projects only `readOnlyHint || workerHint` tools (§5). `dispatch` / `cancel` /
-   `reap` / `resume` carry neither, so they are physically absent — the same
-   mechanism that keeps `dispatch` off the worker surface today.
-2. **Server-side addressing (the new, and the whole point).** `send` is
-   `@worker`, so a worker sees it — but the worker-role server is bound to one
-   session identity at launch (add `boundSession?: SessionUid` to `McpOptions`,
-   set when the env wires the worker's endpoint alongside `role: worker`).
-   For a worker, the server **ignores any `to` argument** and forces
-   `recipient = manager`, `session = boundSession`. Likewise `events`/`wait`
-   resolve "self" from `boundSession`, never from a caller argument. So a worker
-   that maliciously passes `to: {sessions:["sibling"]}` still sends only to its
-   Manager, and one that passes `sessionUid: "sibling"` to `events` still reads
-   only its own feed. **A worker literally cannot name another party.**
+   `reap` / `resume` carry neither, so a worker **physically cannot** spawn or
+   drive any session. The invariant holds by tool absence, and it is checkable
+   in CI (§5).
+2. **Server-side recipient defaulting — a convenience, not a guard.** A worker's
+   `send` needs no recipient because the worker-role server fills it in from the
+   bound session's Manager (bind it with `boundSession?: SessionUid` on
+   `McpOptions`, set when the env wires the worker's endpoint alongside
+   `role: worker`); `events`/`wait` likewise default "self" to that session. We
+   are **not** defending against a worker that *spoofs* a recipient —
+   sender-spoofing is out of the threat model (a worker that wanted to misbehave
+   has easier targets, and the Manager reads every feed anyway). The defaulting
+   is ergonomics: one less address a worker must carry, and tidy inbox scoping —
+   not a security-critical gate.
 
-That is why the collapse is *safer* than draft 1, not just smaller: draft 1
-protected the fleet by keeping the write ops off the worker surface and hoping
-the surface stayed minimal; draft 2 puts one write on the surface but makes the
-dangerous argument — the recipient — unspeakable by a worker. The property to
-test in CI: `send` is the only `@worker` op; and the worker-role server, given
-any `to`/`sessionUid`, resolves to the bound session and its Manager.
+So the property worth stating plainly is narrow: **a worker has no op that
+dispatches or spawns another agent.** Everything else — who it messages, which
+feed it reads — is convenience on top of that one guarantee, and the design does
+not over-index on locking it down.
 
 ## 10. Escalation to the human — building on pm's feed + composer
 
@@ -416,19 +489,21 @@ escalation flow rides both, adding no new pm↔disponent transport:
    `send`*, differently addressed:
    - **Answer** → `send({sessions:[wk]}, body, inReplyTo: q)`. A
      `Message{sender:manager, recipient:worker}` lands on the worker's timeline;
-     the worker pulls it off the same feed it is already reading. The composer
-     for an answer is the send-composer with its target set to the asking worker.
+     the worker pulls it off the same feed it is already reading.
    - **Escalate** → `send({user: wk}, body, inReplyTo: q)`. A
      `Message{sender:manager, recipient:user}` is minted; pm surfaces it in a
      "For you" queue (a filtered view of `messages WHERE recipient=user`). When
-     the human answers there, pm calls `send({sessions:[wk]}, …, inReplyTo: q)`
-     on the Manager's behalf, and the worker's inbox receives it identically. The
-     worker never knows whether a machine or a person answered.
+     the human answers there, the Manager relays a `send({sessions:[wk]}, …,
+     inReplyTo: q)` — **and it may reformat or reinterpret the human's words
+     first**; what the worker receives is the Manager's message, `sender:manager`.
 
-The may-or-may-not nature is recorded honestly by *where the message went*: a
-question with a `recipient=user` message in its reply chain was escalated; one
-answered straight from the Manager was not. pm reads that off the `Message` rows
-— no `status` field, no `escalate` op, just the addresses.
+The worker does **not** learn where an answer came from, by design (§14.6): the
+Manager may reshape the answer, and a worker might not even know a user exists.
+The may-or-may-not nature is recorded honestly on the **Manager side** by *where
+the message went*: a question with a `recipient=user` message in its `inReplyTo`
+chain was escalated; one answered straight from the Manager was not. pm reads
+that off the `Message` rows — no `status` field, no `escalate` op, just the
+addresses.
 
 ## 11. Persistence in the ledger and reconciliation
 
@@ -449,86 +524,111 @@ the system. Stated plainly:
   it.
 - **Durability is the SQLite mirror, not env reality.** With the default sink
   on, messages survive a Manager restart. **Memory-only mode loses them** on
-  exit — the same trade design §3 already names for streamed events. A directive
-  sent in a memory-only session is as durable as an event in one; we do not
+  exit — the same trade design §3 already names for streamed events. We do not
   pretend otherwise.
 - **A reaped session's messages.** `reap()` archives the session; its messages
   archive with it, anchored to it. An unanswered worker question on a reaped
-  session is simply an unread `mail` in the Manager's inbox whose anchor is gone
-  — pm filters reaped anchors out of the live queue.
+  session is simply an unread `mail` whose anchor is gone — pm filters reaped
+  anchors out of the live queue.
 
-Because these rows carry no env handle, they never desync from an environment —
-no scrape, no derived reconstruction — which is exactly why every `mail` event
-is graded **`exact`**: it is a record of disponent's own `send` call, with a row
-to prove it. (Contrast: if a future backend tried to *detect* a worker asking a
-question by scraping its terminal for "should I proceed?", that inference would
-be `derived` — but the `send` op makes that unnecessary, keeping the channel
-`exact`.)
+**Decision (§14.4): accepted for the MVP.** Messages being the first
+ledger-owned entity the environment does not back is a real asymmetry, but a
+benign one — durability is the mirror, reconcile skips them, and if a future
+backend ever gives messages an env home (a real mailbox on the VM) the model can
+adopt it then. Fine for now, cheaply changed later.
+
+This is also why every `mail` event is graded **`exact`**: it is a record of
+disponent's own `send` call, with a row to prove it, no scrape or derived
+reconstruction between the act and the record.
 
 ## 12. Phased implementation
 
 Ordered smallest-first; the MVP is the minimum that delivers **both** flows.
 
 **MVP — both flows, one primitive, pull-based.**
-- Schema: the `Message` entity; the `Party` enum; the `mail` `EventKind` /
-  `EventPayload` variant. Regen.
+- Schema: the `Message` entity (with `fanoutId`, `topic`, `ackedAt`); the `Party`
+  enum; the `FanoutId`/`MessageId` scalars; the `mail` `EventKind` /
+  `EventPayload` variant; `tags: string[]` on `Dispatch`/`DispatchSpec`. Regen.
 - The `@worker` decorator + fluessig's `workerHint` lowering (design §13.2), and
-  the one-line `tools_for` gate extension (§5).
-- Generalize `send` to `send(to?, body, inReplyTo?): Message[]` with Manager
-  addressing (sessions list + user) and the worker recipient-forcing.
-- `McpOptions.boundSession` + worker self-scoping for both `send` (recipient) and
-  `events`/`wait` (inbox) (§9).
-- pm renders the `mail` event and grows the answer/escalate affordances on the
-  pm#158 composer (§10).
+  the one-line `tools_for` gate extension (§5), gating `send` and `ack`.
+- Generalize `send` to `send(to?, body, inReplyTo?, topic?): Message[]` with
+  tag/uid/user addressing, per-send `fanoutId` minting, and worker recipient
+  defaulting; add `ack`.
+- `McpOptions.boundSession` + worker self-scoping for `send` (recipient) and
+  `events`/`wait` (inbox).
+- The topic-scoped latest-wins read convention (worker groups its inbox by
+  `topic`, acts on the newest, then `ack`s).
+- pm renders the `mail` event, shows fan-out ack progress, and grows the
+  answer/escalate affordances on the pm#158 composer (§10).
 
-Enough for: user → Manager → `send({sessions:[…]})` → worker reads inbox; and
-worker `send` → Manager reads → `send` back **or** `send` to user → human →
-`send` back.
+Enough for: user → Manager → `send({tags:[…]}, …, topic)` → a fleet reads inbox,
+acts on the latest, acks; and worker `send` → Manager reads → `send` back **or**
+`send` to user → human → Manager relays back.
 
 **v1.1 — ergonomics.**
-- `labelsMatch` selection sugar (§8), resolved to a uid set at send time.
 - A worker-scoped blocking `wait` that returns on the next `mail` event (§7).
+- Server-marked supersession (a `supersededBy` pointer) if pm wants to gray out
+  stale cards rather than rely on the read-side convention (§14.7).
 
-**Later / maybe.**
-- Push delivery (nudge an `interact`-capable worker's prompt when a `mail`
-  lands) — deferred; it breaks the pull/leaf model (§6, §7). Kept an open
-  question (§14), not a plan.
-- Capability-graded targeting, if a second consumer asks (§8 rejects it as
-  primary).
-
-**Out (deliberately).** A `Question`/`status` machine (replaced by messages +
-`inReplyTo`); a separate `ack` op (replaced by the read cursor, §7);
-worker→worker messaging (unaddressable by construction, §9); structured message
-bodies (strings, like briefs — structure is the consumer's, design §4).
+**Out (deliberately / non-goals).**
+- **Push / backpressure delivery** — a non-goal (§7): flow control is stopping or
+  pausing the worker's process, not a push channel.
+- A `Question`/`status` machine (replaced by messages + `inReplyTo`).
+- worker→worker messaging (no dispatch/spawn on the worker surface, §9).
+- Structured message bodies (strings, like briefs — structure is the consumer's,
+  design §4).
+- Capability-graded targeting (§8 rejects it as a selector).
 
 ## 13. Two worked examples
 
-### (a) Preference fan-out — down
+### (a) Preference fan-out to a thousand workers — down
 
-User, mid-flight, to the Manager Claude: *"Actually, use bun everywhere, not
-npm."* Three workers are live; two touch package config (labeled
-`{area: "pkg"}`), one writes docs.
+User, mid-flight, to the Manager: *"Use pnpm everywhere on projectA, not npm."*
+About a thousand live workers carry the tag `projectA` (inherited from their
+dispatch); another thousand carry `projectB`.
 
 ```text
-Manager:  sessions({ state: "running" })
-          → [wk-A {labels:{area:"pkg"}}, wk-B {labels:{area:"pkg"}}, wk-C {labels:{area:"docs"}}]
 Manager:  send(
-            { sessions: ["wk-A", "wk-B"] },      // MVP: explicit uids
-            "Use bun, not npm, for all package operations."
+            { tags: ["projectA"] },                 // a tag, not a thousand uids
+            "Use pnpm, not npm, for all package operations.",
+            topic: "package-manager"                // the supersession key
           )
-          → [ Message{id:m1, sender:manager, recipient:worker, session:wk-A},
-              Message{id:m2, sender:manager, recipient:worker, session:wk-B} ]
-          // projects: mail@wk-A, mail@wk-B  (fidelity: exact). wk-C untouched.
+          // resolves the tag → the ~1000 live projectA sessions at send time;
+          // mints one Message per session, ALL sharing one fanoutId.
+          → [ Message{ id:m1, fanoutId:f1, topic:"package-manager",
+                       sender:manager, recipient:worker, session:wk-0001 },
+              … ~1000 rows, fanoutId=f1 … ]
+          // projects: a mail event on each projectA timeline (exact). projectB untouched.
 
-worker wk-A:  events({ sessionUid: <self>, afterIdx: <cursor>, kinds: ["mail"] })
-          // self-scoped: the server resolves <self> to boundSession=wk-A
-          → [ Event{ kind:mail, idx:42, payload:{ messageId:m1, sender:manager } } ]
-          // reads m1.body, applies it, advances its cursor past idx 42.
-          // No ack. wk-B pulls m2 whenever it next polls.
+worker wk-0007:  events({ sessionUid:<self>, afterIdx:<cursor>, kinds:["mail"] })
+          // self-scoped: server resolves <self> to boundSession=wk-0007
+          → [ Event{ kind:mail, payload:{ messageId:m7, fanoutId:f1,
+                                          topic:"package-manager", sender:manager } } ]
+          // groups inbox by topic, acts on the LATEST per topic → applies pnpm
+          ack("m7")                                 // stamps ackedAt; Manager-visible
+
+Manager:  // watches the fan-out land without polling each worker:
+          messages({ fanoutId:"f1" })  → ~1000 rows, 640 with ackedAt set
+          // a real "640 of 1000 picked it up" progress view.
 ```
 
-No restart, no broadcast, wk-C never saw it. The Manager gets no read-receipt; if
-it wants one, wk-A just `send`s "switched to bun" back up.
+Then the user changes their mind — latest-wins earns its keep:
+
+```text
+Manager:  send({ tags:["projectA"] }, "Scratch that — bun, not pnpm.",
+               topic: "package-manager")            // SAME topic → supersedes f1
+          → ~1000 new Messages, fanoutId=f2, topic="package-manager"
+
+worker wk-0007:  events(...)   // now sees BOTH m7 (f1) and the f2 message, same topic
+          // latest-wins: acts once, on bun (f2), skips the superseded pnpm (f1).
+          // It does NOT burn a turn applying pnpm and then bun — one action.
+          ack(<f2 message>)
+```
+
+No restart, no broadcast to projectB, no thousand-uid enumeration. Tags address
+the group, the `fanoutId` gives the Manager an ack-based progress view, and
+topic-scoped latest-wins keeps a worker from spending usage on a directive
+already overtaken.
 
 ### (b) Question escalation — up
 
@@ -536,8 +636,8 @@ Worker wk-B is mid-migration and unsure.
 
 ```text
 worker wk-B:  send("Migration 0007 drops `users.legacy_id`, which still has data. Proceed?")
-          // no `to` — the worker-role server forces recipient=manager, session=wk-B
-          → Message{ id:q1, sender:worker, recipient:manager, session:wk-B }
+          // no `to` — the worker-role server fills recipient=manager, session=wk-B
+          → Message{ id:q1, fanoutId:fq, sender:worker, recipient:manager, session:wk-B }
           // projects: mail@wk-B  (fidelity: exact)
 
 // pm's feed (tailing `events`, per pm#158) renders q1 as a "needs a decision" card.
@@ -549,57 +649,67 @@ Manager:  send({ user: "wk-B" }, "wk-B wants to drop users.legacy_id (has data).
           → Message{ id:e1, sender:manager, recipient:user, session:wk-B, inReplyTo:q1 }
           // pm surfaces e1 in the "For you" queue.
 
-// Human, in pm, answers. pm calls send on the Manager's behalf:
+// Human answers in pm. The Manager relays — reshaping the wording as it sees fit:
 Manager:  send({ sessions: ["wk-B"] }, "No — keep the column, backfill instead.",
                inReplyTo: q1)
           → Message{ id:a1, sender:manager, recipient:worker, session:wk-B, inReplyTo:q1 }
-          // projects: mail@wk-B
 
 worker wk-B:  events({ sessionUid: <self>, afterIdx: <cursor>, kinds: ["mail"] })
           → [ Event{ kind:mail, payload:{ messageId:a1, sender:manager } } ]
+          ack("a1")
           // reads a1 → keeps the column. It never knew a human, not the Manager,
-          // answered — the escalation was invisible to it.
+          // answered — the escalation was invisible to it (§14.6).
 ```
 
 Had the Manager known the convention, it skips the `user` send and answers wk-B
-directly — same inbox delivery, no human paged. The difference between the two is
-one address (`user` vs `sessions`), and the `inReplyTo` chain records which
-happened. That is the may-or-may-not escalation, with far fewer moving parts than
-draft 1's `ask`/`answer`/`escalate`.
+directly — same inbox delivery, no human paged. The difference is one address
+(`user` vs `sessions`), and the `inReplyTo` chain records which happened. That is
+the may-or-may-not escalation, with far fewer moving parts than draft 1's
+`ask`/`answer`/`escalate`.
 
-## 14. Open questions
+## 14. Decisions and open questions
 
-1. **Push vs pull delivery.** MVP is pull (the reader calls `events`). Some
-   directives are urgent ("stop touching auth.rs"); is pull ever too slow, and if
-   so is the answer just today's prompt-injecting `send` on an `interact` env as
-   a delivery mode (§6), rather than a new mechanism? Leaning pull-first.
-2. **No read-receipt — is that ever a gap?** §7 drops `ack`, so the Manager
-   cannot see delivery without a reply. If pm's fan-out UI genuinely needs
-   "delivered to N of M," is a lightweight read-cursor readback worth
-   reintroducing, or does an explicit reply message suffice? Leaning: reply
-   suffices; revisit if the UI proves otherwise.
-3. **`boundSession` provenance.** §9 binds the worker server to a session uid at
-   launch. How is that uid delivered without becoming a spoofable argument —
-   env-injected config, a launch-time token, or the tmux session name disponent
-   already labels (design §3)? The last is appealing but couples binding to the
-   local backend.
-4. **The anchor for a fleet-wide user note.** Every `Message` anchors to a
+Resolved (folded into the body above):
+
+1. **Push vs pull — DECIDED: pull-only.** Pull is the model. Making a worker stop
+   (flow control) is done by pausing or stopping its process (`cancel`/`reap`, or
+   a future pause), not by a push/backpressure channel. Push is a non-goal
+   (§7, §12).
+2. **Read-receipt — DECIDED: keep `ack`.** Restored as a first-class `@worker`
+   op. The read cursor is *delivery*; `ack` is *acknowledgement*; counting acks
+   over a `fanoutId` gives the fan-out progress view the cursor alone cannot
+   (§7).
+3. **`boundSession` provenance — DECIDED (relaxed).** Since sender-spoofing is
+   out of the threat model (§9), the binding is a convenience, not a
+   security-critical guard; its provenance need only be good enough to default
+   "self" correctly (env-injected config, or the tmux session name disponent
+   already labels, design §3). Not a blocker.
+4. **Ledger asymmetry — DECIDED: accepted for the MVP.** Messages are the first
+   ledger-owned entity the env doesn't back; reconcile skips them and durability
+   is the mirror (§11). Fine for now, cheaply changed later.
+5. **Fan-out atomicity — DECIDED: acceptable, softened by latest-wins.** A
+   partial fan-out (process died mid-send) is fine: re-sending the same
+   `(tags, topic)` supersedes the partial via latest-wins (§7), so a redo is
+   safe. No fan-out-completion transaction needed for the MVP.
+6. **Escalation provenance — DECIDED: relayed answers are `sender: manager`, no
+   origin surfaced.** The worker need not know where an answer came from — the
+   Manager may reformat or reinterpret it before relaying, and a worker might not
+   even know a user exists (§10). No `origin` marker; add one later only in the
+   unlikely event a worker must treat a human-authored answer differently.
+
+Still open:
+
+7. **Supersession scope.** Latest-wins is defined per (inbox, topic): a worker
+   ignores older same-topic messages in *its own* inbox (§7). Two genuine edges:
+   (a) is `topic` a free string the Manager coins per directive, or should it be
+   a light namespace to avoid accidental collisions between unrelated fan-outs
+   that happen to reuse a word? (b) should disponent stamp a `supersededBy`
+   pointer when a newer same-topic fan-out lands (so pm can gray out stale cards
+   server-side), or stay purely read-side? Leaning free-string topic +
+   read-side for the MVP; revisit if pm wants server-marked supersession.
+8. **The anchor for a fleet-wide user note.** Every `Message` anchors to a
    session (§4). An escalation is always about a worker, so that is fine — but a
    Manager note to the user *not* about any one worker has no anchor. Do we ever
    need one, or is "the user hears from the Manager only about workers" an
    acceptable limit? Leaning acceptable; the Manager talks to its own user
    outside disponent.
-5. **Fan-out atomicity.** `send` to N workers mints N rows. If the process dies
-   mid-fan-out (memory-only, no mirror flush), a subset is delivered. Acceptable
-   (at-least-once per recipient is independent), or does pm need a fan-out id to
-   detect partials? Leaning acceptable.
-6. **Escalation provenance.** When the Manager relays a user's answer down to a
-   worker (§10), the worker sees it as `sender: manager` with `inReplyTo` to its
-   original question — the simplest honest option, and the one specified here:
-   the worker cannot tell whether the Manager or the human authored the answer,
-   and does not need to (the escalation is the Manager's concern, design §7). The
-   alternative — carry a provenance marker (say an `origin: Party` on the relayed
-   message) so a worker *can* see the answer came from the user — is deferred;
-   adopt it only if a worker ever needs to act differently on a human-authored
-   answer. Either way the full trail stays legible on the Manager side via the
-   `inReplyTo` chain and the `recipient=user` message in it.
