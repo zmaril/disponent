@@ -13,8 +13,8 @@
     "*.node"
   ],
   "scripts": {
-    "build": "napi build --platform --release --no-const-enum",
-    "build:debug": "napi build --platform --no-const-enum",
+    "build": "napi build --platform --release --no-const-enum --runtime-string-enum",
+    "build:debug": "napi build --platform --no-const-enum --runtime-string-enum",
     "gen": "bash ../../scripts/gen.sh",
     "test": "bun test"
   },
