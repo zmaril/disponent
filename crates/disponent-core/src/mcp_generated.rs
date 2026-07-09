@@ -92,6 +92,18 @@ pub struct Statement {
     pub params: serde_json::Value,
 }
 
+/// What an environment can do: one row per (env, capability) the catalog
+/// advertises. Mirrors the env_capabilities edge as a flat, returnable value
+/// struct (the closed CapabilityKind vocabulary, plus open detail).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvCapability {
+    pub env_slug: String,
+    pub capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
 /// Somewhere work can run. Config supplies these; the shipped catalog fills offerings + capabilities.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +171,7 @@ pub trait DisponentMcp {
     fn environments(&self) -> anyhow::Result<Vec<Environment>>;
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>>;
     fn offerings(&self) -> anyhow::Result<Vec<Offering>>;
+    fn capabilities(&self) -> anyhow::Result<Vec<EnvCapability>>;
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
@@ -197,6 +210,7 @@ pub fn dispatch<T0: DisponentMcp>(
             Ok(serde_json::to_value(disponent.refresh(env_slug)?)?)
         }
         "disponent_offerings" => Ok(serde_json::to_value(disponent.offerings()?)?),
+        "disponent_capabilities" => Ok(serde_json::to_value(disponent.capabilities()?)?),
         "disponent_dispatch" => {
             let spec: DispatchSpec = arg(args, "spec")?;
             Ok(serde_json::to_value(disponent.dispatch(spec)?)?)
@@ -312,6 +326,18 @@ pub const TOOLS_JSON: &str = r###"{
         "type": "object"
       },
       "name": "disponent_offerings"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "description": "Per-env capabilities: what each environment can do, one row per\n(env, capability) the catalog advertises. Lets a consumer grade backends\nby what they support without reaching for the raw driver plan.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "disponent_capabilities"
     },
     {
       "description": "",

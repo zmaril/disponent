@@ -478,6 +478,29 @@ impl Statement {
     }
 }
 
+/// What an environment can do: one row per (env, capability) the catalog
+/// advertises. Mirrors the env_capabilities edge as a flat, returnable value
+/// struct (the closed CapabilityKind vocabulary, plus open detail).
+#[pyclass(get_all)]
+#[derive(Clone)]
+pub struct EnvCapability {
+    pub env_slug: String,
+    pub capability: CapabilityKind,
+    pub detail: Option<String>,
+}
+#[pymethods]
+impl EnvCapability {
+    #[new]
+    #[pyo3(signature = (env_slug, capability, detail=None))]
+    fn new(env_slug: String, capability: CapabilityKind, detail: Option<String>) -> Self {
+        Self {
+            env_slug,
+            capability,
+            detail,
+        }
+    }
+}
+
 /// Somewhere work can run. Config supplies these; the shipped catalog fills offerings + capabilities.
 #[pyclass(get_all)]
 #[derive(Clone)]
@@ -622,6 +645,7 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn environments(&self) -> anyhow::Result<Vec<Environment>>;
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>>;
     fn offerings(&self) -> anyhow::Result<Vec<Offering>>;
+    fn capabilities(&self) -> anyhow::Result<Vec<EnvCapability>>;
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
@@ -718,6 +742,14 @@ impl Disponent {
     fn offerings(&self, py: Python<'_>) -> PyResult<Vec<Offering>> {
         let core = self.core.clone();
         py.detach(move || core.offerings()).map_err(err)
+    }
+    /// Per-env capabilities: what each environment can do, one row per
+    /// (env, capability) the catalog advertises. Lets a consumer grade backends
+    /// by what they support without reaching for the raw driver plan.
+    #[pyo3(signature = ())]
+    fn capabilities(&self, py: Python<'_>) -> PyResult<Vec<EnvCapability>> {
+        let core = self.core.clone();
+        py.detach(move || core.capabilities()).map_err(err)
     }
     #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, labels=None))]
     fn dispatch(
@@ -880,6 +912,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<McpOptions>()?;
     m.add_class::<DriverPlanOptions>()?;
     m.add_class::<Statement>()?;
+    m.add_class::<EnvCapability>()?;
     m.add_class::<Environment>()?;
     m.add_class::<Offering>()?;
     m.add_class::<Session>()?;

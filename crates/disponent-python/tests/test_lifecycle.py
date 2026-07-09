@@ -11,7 +11,7 @@ import json
 import conftest  # noqa: F401  (imports for its env-var side effects)
 import pytest
 
-from disponent import Disponent, EnvKind, EventKind, SessionState
+from disponent import CapabilityKind, Disponent, EnvKind, EventKind, SessionState
 
 
 def test_whole_lifecycle():
@@ -20,6 +20,21 @@ def test_whole_lifecycle():
     envs = d.environments()
     assert [e.slug for e in envs] == ["local", "exe-dev"]
     assert envs[0].kind == EnvKind.Local
+
+    # per-env capabilities: one row per (env, capability) the catalog advertises
+    caps = d.capabilities()
+    assert any(
+        c.env_slug == "local" and c.capability == CapabilityKind.Dispatch for c in caps
+    )
+    # exe-dev advertises VM isolation; local does not
+    assert any(
+        c.env_slug == "exe-dev" and c.capability == CapabilityKind.IsolationVm
+        for c in caps
+    )
+    assert not any(
+        c.env_slug == "local" and c.capability == CapabilityKind.IsolationVm
+        for c in caps
+    )
 
     session = d.dispatch(
         brief="say hi from python",

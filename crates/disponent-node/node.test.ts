@@ -3,6 +3,7 @@
 // plus the two streams and the enum/JSON seams.
 import { expect, test } from "bun:test";
 import {
+  CapabilityKind,
   Disponent,
   EnvKind,
   EventKind,
@@ -37,6 +38,25 @@ test("the whole lifecycle from JS", async () => {
     "local",
     "exe-dev",
   ]);
+
+  // per-env capabilities: one row per (env, capability) the catalog advertises
+  const caps = await d.capabilities();
+  expect(
+    caps.some(
+      (c: any) => c.envSlug === "local" && c.capability === CapabilityKind.Dispatch,
+    ),
+  ).toBe(true);
+  // exe-dev advertises VM isolation; local does not
+  expect(
+    caps.some(
+      (c: any) => c.envSlug === "exe-dev" && c.capability === CapabilityKind.IsolationVm,
+    ),
+  ).toBe(true);
+  expect(
+    caps.some(
+      (c: any) => c.envSlug === "local" && c.capability === CapabilityKind.IsolationVm,
+    ),
+  ).toBe(false);
 
   const session = await d.dispatch({
     brief: "say hi from node",

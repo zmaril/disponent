@@ -395,6 +395,29 @@
       ]
     },
     {
+      "name": "EnvCapability",
+      "doc": "What an environment can do: one row per (env, capability) the catalog\nadvertises. Mirrors the env_capabilities edge as a flat, returnable value\nstruct (the closed CapabilityKind vocabulary, plus open detail).",
+      "fields": [
+        {
+          "name": "envSlug",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "capability",
+          "type": {
+            "enum": "CapabilityKind"
+          },
+          "nullable": false
+        },
+        {
+          "name": "detail",
+          "type": "Json",
+          "nullable": true
+        }
+      ]
+    },
+    {
       "name": "Environment",
       "doc": "Somewhere work can run. Config supplies these; the shipped catalog fills offerings + capabilities.",
       "fields": [
@@ -675,6 +698,18 @@
           "returns": {
             "list": {
               "model": "Offering"
+            }
+          }
+        },
+        {
+          "name": "capabilities",
+          "doc": "Per-env capabilities: what each environment can do, one row per\n(env, capability) the catalog advertises. Lets a consumer grade backends\nby what they support without reaching for the raw driver plan.",
+          "shape": "unary",
+          "readonly": true,
+          "params": [],
+          "returns": {
+            "list": {
+              "model": "EnvCapability"
             }
           }
         },

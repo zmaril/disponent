@@ -25,6 +25,13 @@ class TestDisponent < Minitest::Test
     assert_equal ["local", "exe-dev"], envs.map(&:slug)
     assert_equal "local", envs[0].kind # enum crosses as its wire string
 
+    # per-env capabilities: one row per (env, capability); capability crosses as
+    # its wire string. exe-dev advertises VM isolation; local does not.
+    caps = d.capabilities
+    assert(caps.any? { |c| c.env_slug == "local" && c.capability == "dispatch" })
+    assert(caps.any? { |c| c.env_slug == "exe-dev" && c.capability == "isolation_vm" })
+    refute(caps.any? { |c| c.env_slug == "local" && c.capability == "isolation_vm" })
+
     session = d.dispatch("say hi from ruby", "local")
     assert_equal "queued", session.state
 

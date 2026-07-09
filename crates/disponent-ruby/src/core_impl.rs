@@ -64,6 +64,13 @@ wire_enum!(Fidelity { Exact => "exact", Derived => "derived", Scraped => "scrape
 wire_enum!(IsolationKind {
     None => "none", Worktree => "worktree", Container => "container", Vm => "vm",
 });
+wire_enum!(CapabilityKind {
+    Dispatch => "dispatch", Interact => "interact", ObserveStream => "observe_stream",
+    ObservePoll => "observe_poll", ListSessions => "list_sessions", Resume => "resume",
+    Cancel => "cancel", Teardown => "teardown", IsolationWorktree => "isolation_worktree",
+    IsolationContainer => "isolation_container", IsolationVm => "isolation_vm",
+    Templates => "templates", ArtifactFetch => "artifact_fetch", UsageReport => "usage_report",
+});
 
 // ── engine DTO → binding DTO ──
 
@@ -124,6 +131,14 @@ fn workspace_link_out(w: mcp::WorkspaceLink) -> WorkspaceLink {
         url: w.url,
         detail: w.detail,
     }
+}
+
+fn env_capability_out(c: mcp::EnvCapability) -> anyhow::Result<EnvCapability> {
+    Ok(EnvCapability {
+        env_slug: c.env_slug,
+        capability: CapabilityKind::from_wire(&c.capability)?,
+        detail: c.detail.map(|v| v.to_string()),
+    })
 }
 
 // ── binding DTO → engine DTO ──
@@ -203,6 +218,14 @@ impl DisponentCore for DisponentImpl {
             .into_iter()
             .map(offering_out)
             .collect())
+    }
+
+    fn capabilities(&self) -> anyhow::Result<Vec<EnvCapability>> {
+        self.engine
+            .capabilities()?
+            .into_iter()
+            .map(env_capability_out)
+            .collect()
     }
 
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>> {

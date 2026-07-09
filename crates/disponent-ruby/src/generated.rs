@@ -254,6 +254,41 @@ impl CapabilityKind {
         }
     }
 }
+impl CapabilityKind {
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch",
+            Self::Interact => "interact",
+            Self::ObserveStream => "observe_stream",
+            Self::ObservePoll => "observe_poll",
+            Self::ListSessions => "list_sessions",
+            Self::Resume => "resume",
+            Self::Cancel => "cancel",
+            Self::Teardown => "teardown",
+            Self::IsolationWorktree => "isolation_worktree",
+            Self::IsolationContainer => "isolation_container",
+            Self::IsolationVm => "isolation_vm",
+            Self::Templates => "templates",
+            Self::ArtifactFetch => "artifact_fetch",
+            Self::UsageReport => "usage_report",
+        }
+    }
+}
+/// A getter returning this enum hands Ruby its wire string.
+impl magnus::IntoValue for CapabilityKind {
+    fn into_value_with(self, ruby: &magnus::Ruby) -> magnus::Value {
+        ruby.str_new(self.wire()).as_value()
+    }
+}
+impl magnus::TryConvert for CapabilityKind {
+    fn try_convert(val: magnus::Value) -> Result<Self, magnus::Error> {
+        Self::parse(&<String as magnus::TryConvert>::try_convert(val)?).map_err(rberr)
+    }
+}
+// SAFETY: the enum owns its data (a Copy discriminant) — no borrow from
+// the Ruby value survives, so it is sound in owning positions like
+// `Vec<Self>` (an enum-list input param).
+unsafe impl magnus::try_convert::TryConvertOwned for CapabilityKind {}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum EventKind {
@@ -556,6 +591,28 @@ impl Statement {
     }
 }
 
+/// What an environment can do: one row per (env, capability) the catalog
+/// advertises. Mirrors the env_capabilities edge as a flat, returnable value
+/// struct (the closed CapabilityKind vocabulary, plus open detail).
+#[magnus::wrap(class = "Disponent::EnvCapability", free_immediately, size)]
+#[derive(Clone)]
+pub struct EnvCapability {
+    pub env_slug: String,
+    pub capability: CapabilityKind,
+    pub detail: Option<String>,
+}
+impl EnvCapability {
+    fn get_env_slug(&self) -> String {
+        self.env_slug.clone()
+    }
+    fn get_capability(&self) -> CapabilityKind {
+        self.capability.clone()
+    }
+    fn get_detail(&self) -> Option<String> {
+        self.detail.clone()
+    }
+}
+
 /// Somewhere work can run. Config supplies these; the shipped catalog fills offerings + capabilities.
 #[magnus::wrap(class = "Disponent::Environment", free_immediately, size)]
 #[derive(Clone)]
@@ -699,6 +756,7 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn environments(&self) -> anyhow::Result<Vec<Environment>>;
     fn refresh(&self, env_slug: Option<String>) -> anyhow::Result<Vec<Environment>>;
     fn offerings(&self) -> anyhow::Result<Vec<Offering>>;
+    fn capabilities(&self) -> anyhow::Result<Vec<EnvCapability>>;
     fn dispatch(&self, spec: DispatchSpec) -> anyhow::Result<Session>;
     fn session(&self, uid: String) -> anyhow::Result<Option<Session>>;
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
@@ -800,6 +858,18 @@ impl Disponent {
     /// for the raw driver plan.
     fn offerings(&self) -> Result<magnus::RArray, Error> {
         let out = self.core.offerings().map_err(rberr)?;
+        let ruby = Ruby::get().map_err(|e| rberr(e))?;
+        let ary = ruby.ary_new();
+        for v in out {
+            ary.push(v)?;
+        }
+        Ok(ary)
+    }
+    /// Per-env capabilities: what each environment can do, one row per
+    /// (env, capability) the catalog advertises. Lets a consumer grade backends
+    /// by what they support without reaching for the raw driver plan.
+    fn capabilities(&self) -> Result<magnus::RArray, Error> {
+        let out = self.core.capabilities().map_err(rberr)?;
         let ruby = Ruby::get().map_err(|e| rberr(e))?;
         let ary = ruby.ary_new();
         for v in out {
@@ -1001,6 +1071,10 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     let c = class.define_class("Statement", ruby.class_object())?;
     c.define_method("sql", method!(Statement::get_sql, 0))?;
     c.define_method("params", method!(Statement::get_params, 0))?;
+    let c = class.define_class("EnvCapability", ruby.class_object())?;
+    c.define_method("env_slug", method!(EnvCapability::get_env_slug, 0))?;
+    c.define_method("capability", method!(EnvCapability::get_capability, 0))?;
+    c.define_method("detail", method!(EnvCapability::get_detail, 0))?;
     let c = class.define_class("Environment", ruby.class_object())?;
     c.define_method("slug", method!(Environment::get_slug, 0))?;
     c.define_method("kind", method!(Environment::get_kind, 0))?;
@@ -1042,6 +1116,7 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("environments", method!(Disponent::environments, 0))?;
     class.define_method("refresh", method!(Disponent::refresh, -1))?;
     class.define_method("offerings", method!(Disponent::offerings, 0))?;
+    class.define_method("capabilities", method!(Disponent::capabilities, 0))?;
     class.define_method("dispatch", method!(Disponent::dispatch, -1))?;
     class.define_method("session", method!(Disponent::session, 1))?;
     class.define_method("sessions", method!(Disponent::sessions, -1))?;
