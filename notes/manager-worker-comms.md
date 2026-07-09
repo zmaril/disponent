@@ -397,8 +397,12 @@ So when the Manager sends "use pnpm" and then "actually, use bun" to
 `tags:["projectA"]` with the same `topic:"package-manager"`, a worker that reads
 both acts once — on bun — and a thousand workers do not each act twice and waste
 a turn. Superseded messages are not deleted (the timeline is append-only); they
-are simply ignored by the read-side convention. (Scope of supersession is a
-genuine sub-question — see §14.7.)
+are simply ignored by the read-side convention. **Supersession is keyed on
+`(recipient, topic)`** (decided, §14.7): within one worker's own inbox, the
+newest message on a topic wins — that is exactly what a worker can evaluate
+locally from the feed it reads, and it does not depend on fleet-wide tag
+membership, which can drift mid-flight. (Easily swapped for a global
+`(tag, topic)` key if a broadcast-wide semantic is ever wanted.)
 
 - **Ordering.** Per-inbox FIFO by `Event.idx` on the anchor timeline. No
   cross-session order is promised: a fan-out to N workers is N independent
@@ -667,9 +671,10 @@ directly — same inbox delivery, no human paged. The difference is one address
 the may-or-may-not escalation, with far fewer moving parts than draft 1's
 `ask`/`answer`/`escalate`.
 
-## 14. Decisions and open questions
+## 14. Decisions
 
-Resolved (folded into the body above):
+Every question raised across the drafts is resolved; the record below is what was
+decided and why (all folded into the body above).
 
 1. **Push vs pull — DECIDED: pull-only.** Pull is the model. Making a worker stop
    (flow control) is done by pausing or stopping its process (`cancel`/`reap`, or
@@ -697,19 +702,20 @@ Resolved (folded into the body above):
    even know a user exists (§10). No `origin` marker; add one later only in the
    unlikely event a worker must treat a human-authored answer differently.
 
-Still open:
-
-7. **Supersession scope.** Latest-wins is defined per (inbox, topic): a worker
-   ignores older same-topic messages in *its own* inbox (§7). Two genuine edges:
-   (a) is `topic` a free string the Manager coins per directive, or should it be
-   a light namespace to avoid accidental collisions between unrelated fan-outs
-   that happen to reuse a word? (b) should disponent stamp a `supersededBy`
-   pointer when a newer same-topic fan-out lands (so pm can gray out stale cards
-   server-side), or stay purely read-side? Leaning free-string topic +
-   read-side for the MVP; revisit if pm wants server-marked supersession.
-8. **The anchor for a fleet-wide user note.** Every `Message` anchors to a
-   session (§4). An escalation is always about a worker, so that is fine — but a
-   Manager note to the user *not* about any one worker has no anchor. Do we ever
-   need one, or is "the user hears from the Manager only about workers" an
-   acceptable limit? Leaning acceptable; the Manager talks to its own user
-   outside disponent.
+7. **Supersession scope — DECIDED: keyed on `(recipient, topic)`.** Latest-wins
+   is evaluated within one worker's own inbox — the newest message on a given
+   `topic` supersedes older ones there (§7) — because that is what a worker can
+   compute locally from the feed it reads, and it does not lean on fleet-wide tag
+   membership, which can drift. Recipients are snapshotted **at send time** (a
+   fan-out mints its Messages against the sessions live *then*, §8), so a later
+   tag change never retroactively adds or removes recipients from an existing
+   `fanoutId`. Two sub-choices settle with it: `topic` is a free string the
+   Manager coins, and supersession stays purely read-side for the MVP (no
+   `supersededBy` stamp). Easily swapped for a global `(tag, topic)` key if a
+   broadcast-wide semantic is ever wanted — cheap to change later.
+8. **Fleet-wide user note anchor — DECIDED: accepted for the MVP.** Every
+   `Message` anchors to a session (§4), and an escalation is always about a
+   worker, so the flows here are covered. A Manager note to the user *not* about
+   any one worker has no anchor — an acceptable limit for now (the Manager talks
+   to its own user outside disponent), cheaply changed later if a fleet-level
+   user channel is ever wanted.
