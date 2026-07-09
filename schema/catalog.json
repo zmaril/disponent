@@ -15,6 +15,14 @@
       "base": "string"
     },
     {
+      "name": "MessageId",
+      "base": "string"
+    },
+    {
+      "name": "FanoutId",
+      "base": "string"
+    },
+    {
       "name": "Cents",
       "base": "int64"
     }
@@ -85,6 +93,14 @@
           "type": {
             "k": "ref",
             "name": "RawObservation",
+            "entity": false
+          }
+        },
+        {
+          "tag": "mail",
+          "type": {
+            "k": "ref",
+            "name": "MailRef",
             "entity": false
           }
         }
@@ -268,6 +284,23 @@
         },
         {
           "name": "raw"
+        },
+        {
+          "name": "mail"
+        }
+      ]
+    },
+    {
+      "name": "Party",
+      "variants": [
+        {
+          "name": "manager"
+        },
+        {
+          "name": "worker"
+        },
+        {
+          "name": "user"
         }
       ]
     },
@@ -808,6 +841,18 @@
           "doc": "MCP recursion depth: 0 = dispatched by the host program."
         },
         {
+          "name": "tags",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "scalar",
+              "name": "string"
+            }
+          },
+          "nullable": true,
+          "doc": "Selection tags — the PRIMARY handle the Manager addresses a message\nfan-out to (notes/manager-worker-comms.md §8). A session inherits its\ndispatch's tags. Flat strings, indexable; distinct from the opaque\n`labels: Json`, which stays for arbitrary consumer metadata."
+        },
+        {
           "name": "labels",
           "type": {
             "k": "scalar",
@@ -1175,6 +1220,131 @@
           "nullable": false
         }
       ]
+    },
+    {
+      "name": "Message",
+      "table": "messages",
+      "key": [
+        "id"
+      ],
+      "doc": "One message dropped in one inbox — the manager↔worker communication\nprimitive (notes/manager-worker-comms.md). The Manager mints these addressed\nto a worker or the user; a worker mints them addressed (implicitly) to its\nManager. Disponent owns these rows — no environment backs them, so reconcile\nskips them and durability is the SQLite mirror (design §11).",
+      "fields": [
+        {
+          "name": "id",
+          "type": {
+            "k": "scalar",
+            "name": "MessageId",
+            "base": "string"
+          },
+          "nullable": false,
+          "key": true
+        },
+        {
+          "name": "createdAt",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": false
+        },
+        {
+          "name": "sender",
+          "type": {
+            "k": "enum",
+            "name": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "k": "enum",
+            "name": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "session",
+          "type": {
+            "k": "ref",
+            "name": "Session",
+            "entity": true
+          },
+          "nullable": false,
+          "doc": "The worker session this message rides. EVERY message anchors to exactly\none session's timeline — that is how both parties pull it via `events`:\na Manager→worker note rides the recipient's timeline, a worker→Manager\nquestion rides the sender's, a Manager→user escalation rides the timeline\nof the worker it is about.",
+          "relation": {
+            "to": "Session",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "session_uid"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "body",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": false,
+          "doc": "The payload — free-form text, like the brief. Structure is the consumer's."
+        },
+        {
+          "name": "inReplyTo",
+          "type": {
+            "k": "ref",
+            "name": "Message",
+            "entity": true
+          },
+          "nullable": true,
+          "doc": "Threading: the message this one replies to (an answer to a question, an\nescalation of a worker's message). Null for an unsolicited directive.\nWalking `inReplyTo` reconstructs a question's whole life — no status enum.",
+          "relation": {
+            "to": "Message",
+            "cardinality": "one",
+            "kind": "association",
+            "properties": null,
+            "fkColumns": [
+              "in_reply_to"
+            ],
+            "typeColumn": null,
+            "sourceColumns": null,
+            "sourceTypeColumn": null
+          }
+        },
+        {
+          "name": "fanoutId",
+          "type": {
+            "k": "scalar",
+            "name": "FanoutId",
+            "base": "string"
+          },
+          "nullable": false,
+          "doc": "One logical Manager broadcast → N Messages that all share this id. A\nsingle-recipient send still gets one (a fan-out of one). Counting acks over\na `fanoutId` is how the Manager sees \"N of M picked up the directive.\""
+        },
+        {
+          "name": "topic",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Supersession key. A newer fan-out carrying the same `topic` supersedes\nolder same-topic messages in an inbox: a reader acts on the LATEST message\nper (recipient, topic) and skips the stale ones. Null = standalone."
+        },
+        {
+          "name": "ackedAt",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": true,
+          "doc": "Stamped by the recipient's `ack`: received/handled. Manager-observable.\nNull = delivered (readable on the feed) but not yet acknowledged."
+        }
+      ]
     }
   ],
   "relationProperties": [
@@ -1378,6 +1548,54 @@
       ]
     },
     {
+      "name": "MailRef",
+      "doc": "Pointer + the fields a reader needs to triage a `mail` event without\nfetching the Message: direction (sender/recipient), the fan-out it belongs\nto, and its topic (so a reader can group by topic for latest-wins).",
+      "fields": [
+        {
+          "name": "messageId",
+          "type": {
+            "k": "scalar",
+            "name": "MessageId",
+            "base": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "sender",
+          "type": {
+            "k": "enum",
+            "name": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "k": "enum",
+            "name": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "fanoutId",
+          "type": {
+            "k": "scalar",
+            "name": "FanoutId",
+            "base": "string"
+          },
+          "nullable": false
+        },
+        {
+          "name": "topic",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true
+        }
+      ]
+    },
+    {
       "name": "OpenOptions",
       "fields": [
         {
@@ -1512,6 +1730,18 @@
           "doc": "Skip catalog validation of (env, agent, model); the env's own error becomes the report."
         },
         {
+          "name": "tags",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "scalar",
+              "name": "string"
+            }
+          },
+          "nullable": true,
+          "doc": "Selection tags a message fan-out can address this session by (§8)."
+        },
+        {
           "name": "labels",
           "type": {
             "k": "scalar",
@@ -1627,6 +1857,100 @@
             }
           },
           "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "SendTarget",
+      "doc": "Where a Manager-sent message goes. A worker never fills this: the\nworker-role server defaults recipient = its Manager, anchored to the bound\nsession (deferred to the MCP layer). A Manager sets exactly one destination.",
+      "fields": [
+        {
+          "name": "tags",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "scalar",
+              "name": "string"
+            }
+          },
+          "nullable": true,
+          "doc": "PRIMARY (§8): every live session whose dispatch carries any of these tags.\n`tags:[\"projectA\"]` reaches all projectA workers without enumerating uids.\nResolved to concrete recipients at send time (a snapshot, never kept live)."
+        },
+        {
+          "name": "sessions",
+          "type": {
+            "k": "list",
+            "of": {
+              "k": "scalar",
+              "name": "SessionUid",
+              "base": "string"
+            }
+          },
+          "nullable": true,
+          "doc": "Precise fallback: exact recipients by session uid."
+        },
+        {
+          "name": "user",
+          "type": {
+            "k": "scalar",
+            "name": "SessionUid",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "Escalate to the human above the Manager, about this worker session (§10)."
+        }
+      ]
+    },
+    {
+      "name": "MessagesFilter",
+      "doc": "Filter for the `messages` read. Absent fields don't constrain.",
+      "fields": [
+        {
+          "name": "fanoutId",
+          "type": {
+            "k": "scalar",
+            "name": "FanoutId",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "All Messages of one fan-out — the Manager's ack-progress view."
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "k": "enum",
+            "name": "Party"
+          },
+          "nullable": true,
+          "doc": "Only messages addressed to this party (inbox scoping)."
+        },
+        {
+          "name": "sessionUid",
+          "type": {
+            "k": "scalar",
+            "name": "SessionUid",
+            "base": "string"
+          },
+          "nullable": true,
+          "doc": "Only messages anchored to this session's timeline."
+        },
+        {
+          "name": "topic",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Only messages carrying this topic."
+        },
+        {
+          "name": "latestPerTopic",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": true,
+          "doc": "Collapse to the newest message per (recipient, topic) in scope — the\nread-side latest-wins convention (§7). Standalone (null-topic) messages\nare always kept."
         }
       ]
     },

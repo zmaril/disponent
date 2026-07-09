@@ -30,6 +30,8 @@ pub struct DispatchSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unchecked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<serde_json::Value>,
 }
 
@@ -65,6 +67,36 @@ pub struct EventOptions {
     pub after_idx: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kinds: Option<Vec<String>>,
+}
+
+/// Where a Manager-sent message goes. A worker never fills this: the
+/// worker-role server defaults recipient = its Manager, anchored to the bound
+/// session (deferred to the MCP layer). A Manager sets exactly one destination.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+}
+
+/// Filter for the `messages` read. Absent fields don't constrain.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagesFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_uid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_per_topic: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -166,6 +198,29 @@ pub struct Event {
     pub payload: serde_json::Value,
 }
 
+/// One message dropped in one inbox — the manager↔worker communication
+/// primitive (notes/manager-worker-comms.md). The Manager mints these addressed
+/// to a worker or the user; a worker mints them addressed (implicitly) to its
+/// Manager. Disponent owns these rows — no environment backs them, so reconcile
+/// skips them and durability is the SQLite mirror (design §11).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Message {
+    pub id: String,
+    pub created_at: String,
+    pub sender: String,
+    pub recipient: String,
+    pub session_uid: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+    pub fanout_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acked_at: Option<String>,
+}
+
 /// The `Disponent` MCP contract — implement over the open engine.
 pub trait DisponentMcp {
     fn environments(&self) -> anyhow::Result<Vec<Environment>>;
@@ -183,7 +238,15 @@ pub trait DisponentMcp {
         after: Option<i64>,
         limit: Option<u32>,
     ) -> anyhow::Result<Vec<Event>>;
-    fn send(&self, session_uid: String, input: String) -> anyhow::Result<()>;
+    fn send(
+        &self,
+        to: Option<SendTarget>,
+        body: String,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> anyhow::Result<Vec<Message>>;
+    fn ack(&self, message_id: String) -> anyhow::Result<()>;
+    fn messages(&self, filter: Option<MessagesFilter>) -> anyhow::Result<Vec<Message>>;
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session>;
     fn resume(&self, session_uid: String) -> anyhow::Result<Session>;
     fn reap(&self, session_uid: String) -> anyhow::Result<Session>;
@@ -238,9 +301,24 @@ pub fn dispatch<T0: DisponentMcp>(
             )?)
         }
         "disponent_send" => {
-            let session_uid: String = arg(args, "sessionUid")?;
-            let input: String = arg(args, "input")?;
-            Ok(serde_json::to_value(disponent.send(session_uid, input)?)?)
+            let to: Option<SendTarget> = opt_arg(args, "to")?;
+            let body: String = arg(args, "body")?;
+            let in_reply_to: Option<String> = opt_arg(args, "inReplyTo")?;
+            let topic: Option<String> = opt_arg(args, "topic")?;
+            Ok(serde_json::to_value(disponent.send(
+                to,
+                body,
+                in_reply_to,
+                topic,
+            )?)?)
+        }
+        "disponent_ack" => {
+            let message_id: String = arg(args, "messageId")?;
+            Ok(serde_json::to_value(disponent.ack(message_id)?)?)
+        }
+        "disponent_messages" => {
+            let filter: Option<MessagesFilter> = opt_arg(args, "filter")?;
+            Ok(serde_json::to_value(disponent.messages(filter)?)?)
         }
         "disponent_cancel" => {
             let session_uid: String = arg(args, "sessionUid")?;
@@ -382,6 +460,12 @@ pub const TOOLS_JSON: &str = r###"{
               "setup": {
                 "type": "string"
               },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "template": {
                 "type": "string"
               },
@@ -519,7 +603,8 @@ pub const TOOLS_JSON: &str = r###"{
                     "log",
                     "usage",
                     "artifact",
-                    "raw"
+                    "raw",
+                    "mail"
                   ],
                   "type": "string"
                 },
@@ -551,24 +636,114 @@ pub const TOOLS_JSON: &str = r###"{
       "name": "disponent_events"
     },
     {
-      "description": "",
+      "description": "The one messaging primitive (notes/manager-worker-comms.md §6). A Manager\n`to` names a tagged worker subset (fan-out) or the user; recipients resolve\nat send time to a concrete list (a snapshot, never kept live). One Message\nis minted per matched session, all sharing a freshly minted `fanoutId`;\n`topic` (optional) is the supersession key for latest-wins (§7). Returns the\nMessages minted. Delivery is the reader's `events` pull; a message to a\nconcrete live worker is also delivered best-effort to its prompt on an\ninteract-capable env (the legacy `send` behavior, now one backend delivery).\nWorker self-send (recipient forced to the Manager) is a worker-role MCP\nconcern, deferred — the core send is the Manager surface.",
       "inputSchema": {
+        "$defs": {
+          "SendTarget": {
+            "additionalProperties": false,
+            "description": "Where a Manager-sent message goes. A worker never fills this: the\nworker-role server defaults recipient = its Manager, anchored to the bound\nsession (deferred to the MCP layer). A Manager sets exactly one destination.",
+            "properties": {
+              "sessions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "tags": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "user": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
         "additionalProperties": false,
         "properties": {
-          "input": {
+          "body": {
             "type": "string"
           },
-          "sessionUid": {
+          "inReplyTo": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/SendTarget"
+          },
+          "topic": {
             "type": "string"
           }
         },
         "required": [
-          "sessionUid",
-          "input"
+          "body"
         ],
         "type": "object"
       },
       "name": "disponent_send"
+    },
+    {
+      "description": "Acknowledge a message you received (received/handled): stamps `ackedAt`,\nwhich the Manager observes across a `fanoutId` to see \"N of M acted\" (§7).\nIdempotent.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "messageId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "messageId"
+        ],
+        "type": "object"
+      },
+      "name": "disponent_ack"
+    },
+    {
+      "annotations": {
+        "readOnlyHint": true
+      },
+      "description": "Read Messages, filtered. The Manager's fan-out ack-progress view\n(`{fanoutId}`) and a recipient's inbox (`{recipient, sessionUid}`, optionally\n`latestPerTopic` for the read-side latest-wins collapse, §7).",
+      "inputSchema": {
+        "$defs": {
+          "MessagesFilter": {
+            "additionalProperties": false,
+            "description": "Filter for the `messages` read. Absent fields don't constrain.",
+            "properties": {
+              "fanoutId": {
+                "type": "string"
+              },
+              "latestPerTopic": {
+                "type": "boolean"
+              },
+              "recipient": {
+                "enum": [
+                  "manager",
+                  "worker",
+                  "user"
+                ],
+                "type": "string"
+              },
+              "sessionUid": {
+                "type": "string"
+              },
+              "topic": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "properties": {
+          "filter": {
+            "$ref": "#/$defs/MessagesFilter"
+          }
+        },
+        "type": "object"
+      },
+      "name": "disponent_messages"
     },
     {
       "annotations": {

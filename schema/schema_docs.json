@@ -205,6 +205,14 @@
       },
       {
         "def": null,
+        "desc": "Selection tags — the PRIMARY handle the Manager addresses a message\nfan-out to (notes/manager-worker-comms.md §8). A session inherits its\ndispatch's tags. Flat strings, indexable; distinct from the opaque\n`labels: Json`, which stays for arbitrary consumer metadata.",
+        "name": "tags",
+        "notNull": false,
+        "pk": false,
+        "type": "json"
+      },
+      {
+        "def": null,
         "desc": "Consumer labels, opaque to disponent.",
         "name": "labels",
         "notNull": false,
@@ -352,6 +360,92 @@
     ],
     "desc": "One observation on a session's timeline (containment rides the key: the\nsession FK + the position, like Artifact/Usage — to-manys are queries).",
     "name": "events"
+  },
+  {
+    "cols": [
+      {
+        "def": null,
+        "desc": null,
+        "name": "id",
+        "notNull": true,
+        "pk": true,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "created_at",
+        "notNull": true,
+        "pk": false,
+        "type": "timestamp"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "sender",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": null,
+        "name": "recipient",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "The worker session this message rides. EVERY message anchors to exactly\none session's timeline — that is how both parties pull it via `events`:\na Manager→worker note rides the recipient's timeline, a worker→Manager\nquestion rides the sender's, a Manager→user escalation rides the timeline\nof the worker it is about.",
+        "name": "session_uid",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "The payload — free-form text, like the brief. Structure is the consumer's.",
+        "name": "body",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Threading: the message this one replies to (an answer to a question, an\nescalation of a worker's message). Null for an unsolicited directive.\nWalking `inReplyTo` reconstructs a question's whole life — no status enum.",
+        "name": "in_reply_to",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "One logical Manager broadcast → N Messages that all share this id. A\nsingle-recipient send still gets one (a fan-out of one). Counting acks over\na `fanoutId` is how the Manager sees \"N of M picked up the directive.\"",
+        "name": "fanout_id",
+        "notNull": true,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Supersession key. A newer fan-out carrying the same `topic` supersedes\nolder same-topic messages in an inbox: a reader acts on the LATEST message\nper (recipient, topic) and skips the stale ones. Null = standalone.",
+        "name": "topic",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "Stamped by the recipient's `ack`: received/handled. Manager-observable.\nNull = delivered (readable on the feed) but not yet acknowledged.",
+        "name": "acked_at",
+        "notNull": false,
+        "pk": false,
+        "type": "timestamp"
+      }
+    ],
+    "desc": "One message dropped in one inbox — the manager↔worker communication\nprimitive (notes/manager-worker-comms.md). The Manager mints these addressed\nto a worker or the user; a worker mints them addressed (implicitly) to its\nManager. Disponent owns these rows — no environment backs them, so reconcile\nskips them and durability is the SQLite mirror (design §11).",
+    "name": "messages"
   },
   {
     "cols": [

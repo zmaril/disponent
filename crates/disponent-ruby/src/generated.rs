@@ -301,6 +301,7 @@ pub enum EventKind {
     Usage,
     Artifact,
     Raw,
+    Mail,
 }
 impl EventKind {
     pub fn parse(s: &str) -> anyhow::Result<Self> {
@@ -313,7 +314,8 @@ impl EventKind {
             "usage" => Ok(Self::Usage),
             "artifact" => Ok(Self::Artifact),
             "raw" => Ok(Self::Raw),
-            other => Err(anyhow::anyhow!("unknown EventKind: {other} (expected state | message | tool_call | tool_result | log | usage | artifact | raw)"))
+            "mail" => Ok(Self::Mail),
+            other => Err(anyhow::anyhow!("unknown EventKind: {other} (expected state | message | tool_call | tool_result | log | usage | artifact | raw | mail)"))
         }
     }
 }
@@ -328,6 +330,7 @@ impl EventKind {
             Self::Usage => "usage",
             Self::Artifact => "artifact",
             Self::Raw => "raw",
+            Self::Mail => "mail",
         }
     }
 }
@@ -346,6 +349,49 @@ impl magnus::TryConvert for EventKind {
 // the Ruby value survives, so it is sound in owning positions like
 // `Vec<Self>` (an enum-list input param).
 unsafe impl magnus::try_convert::TryConvertOwned for EventKind {}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Party {
+    Manager,
+    Worker,
+    User,
+}
+impl Party {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "manager" => Ok(Self::Manager),
+            "worker" => Ok(Self::Worker),
+            "user" => Ok(Self::User),
+            other => Err(anyhow::anyhow!(
+                "unknown Party: {other} (expected manager | worker | user)"
+            )),
+        }
+    }
+}
+impl Party {
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Self::Manager => "manager",
+            Self::Worker => "worker",
+            Self::User => "user",
+        }
+    }
+}
+/// A getter returning this enum hands Ruby its wire string.
+impl magnus::IntoValue for Party {
+    fn into_value_with(self, ruby: &magnus::Ruby) -> magnus::Value {
+        ruby.str_new(self.wire()).as_value()
+    }
+}
+impl magnus::TryConvert for Party {
+    fn try_convert(val: magnus::Value) -> Result<Self, magnus::Error> {
+        Self::parse(&<String as magnus::TryConvert>::try_convert(val)?).map_err(rberr)
+    }
+}
+// SAFETY: the enum owns its data (a Copy discriminant) — no borrow from
+// the Ruby value survives, so it is sound in owning positions like
+// `Vec<Self>` (an enum-list input param).
+unsafe impl magnus::try_convert::TryConvertOwned for Party {}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Fidelity {
@@ -479,6 +525,18 @@ pub struct RawObservation {
     pub data: String,
 }
 
+/// Pointer + the fields a reader needs to triage a `mail` event without
+/// fetching the Message: direction (sender/recipient), the fan-out it belongs
+/// to, and its topic (so a reader can group by topic for latest-wins).
+#[derive(Clone)]
+pub struct MailRef {
+    pub message_id: String,
+    pub sender: Party,
+    pub recipient: Party,
+    pub fanout_id: String,
+    pub topic: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct OpenOptions {
     pub config_path: Option<String>,
@@ -500,6 +558,7 @@ pub struct DispatchSpec {
     pub timeout_secs: Option<i32>,
     pub max_budget: Option<String>,
     pub unchecked: Option<bool>,
+    pub tags: Option<Vec<String>>,
     pub labels: Option<String>,
 }
 
@@ -539,6 +598,26 @@ pub struct EventOptions {
     pub session_uid: Option<String>,
     pub after_idx: Option<i64>,
     pub kinds: Option<Vec<EventKind>>,
+}
+
+/// Where a Manager-sent message goes. A worker never fills this: the
+/// worker-role server defaults recipient = its Manager, anchored to the bound
+/// session (deferred to the MCP layer). A Manager sets exactly one destination.
+#[derive(Clone)]
+pub struct SendTarget {
+    pub tags: Option<Vec<String>>,
+    pub sessions: Option<Vec<String>>,
+    pub user: Option<String>,
+}
+
+/// Filter for the `messages` read. Absent fields don't constrain.
+#[derive(Clone)]
+pub struct MessagesFilter {
+    pub fanout_id: Option<String>,
+    pub recipient: Option<Party>,
+    pub session_uid: Option<String>,
+    pub topic: Option<String>,
+    pub latest_per_topic: Option<bool>,
 }
 
 #[magnus::wrap(class = "Disponent::ReconcileReport", free_immediately, size)]
@@ -751,6 +830,58 @@ impl Event {
     }
 }
 
+/// One message dropped in one inbox — the manager↔worker communication
+/// primitive (notes/manager-worker-comms.md). The Manager mints these addressed
+/// to a worker or the user; a worker mints them addressed (implicitly) to its
+/// Manager. Disponent owns these rows — no environment backs them, so reconcile
+/// skips them and durability is the SQLite mirror (design §11).
+#[magnus::wrap(class = "Disponent::Message", free_immediately, size)]
+#[derive(Clone)]
+pub struct Message {
+    pub id: String,
+    pub created_at: String,
+    pub sender: Party,
+    pub recipient: Party,
+    pub session_uid: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+    pub fanout_id: String,
+    pub topic: Option<String>,
+    pub acked_at: Option<String>,
+}
+impl Message {
+    fn get_id(&self) -> String {
+        self.id.clone()
+    }
+    fn get_created_at(&self) -> String {
+        self.created_at.clone()
+    }
+    fn get_sender(&self) -> Party {
+        self.sender.clone()
+    }
+    fn get_recipient(&self) -> Party {
+        self.recipient.clone()
+    }
+    fn get_session_uid(&self) -> String {
+        self.session_uid.clone()
+    }
+    fn get_body(&self) -> String {
+        self.body.clone()
+    }
+    fn get_in_reply_to(&self) -> Option<String> {
+        self.in_reply_to.clone()
+    }
+    fn get_fanout_id(&self) -> String {
+        self.fanout_id.clone()
+    }
+    fn get_topic(&self) -> Option<String> {
+        self.topic.clone()
+    }
+    fn get_acked_at(&self) -> Option<String> {
+        self.acked_at.clone()
+    }
+}
+
 /// The `Disponent` contract — implement over the engine in `crate::core_impl`.
 pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn open(options: Option<OpenOptions>) -> anyhow::Result<Self>;
@@ -763,7 +894,15 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
     fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink>;
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
-    fn send(&self, session_uid: String, input: String) -> anyhow::Result<()>;
+    fn send(
+        &self,
+        to: Option<SendTarget>,
+        body: String,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> anyhow::Result<Vec<Message>>;
+    fn ack(&self, message_id: String) -> anyhow::Result<()>;
+    fn messages(&self, filter: Option<MessagesFilter>) -> anyhow::Result<Vec<Message>>;
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session>;
     fn resume(&self, session_uid: String) -> anyhow::Result<Session>;
     fn reap(&self, session_uid: String) -> anyhow::Result<Session>;
@@ -933,7 +1072,11 @@ impl Disponent {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
-        let labels: Option<String> = match args.get(13).copied() {
+        let tags: Option<Vec<String>> = match args.get(13).copied() {
+            Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
+            _ => None,
+        };
+        let labels: Option<String> = match args.get(14).copied() {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
@@ -955,6 +1098,7 @@ impl Disponent {
             timeout_secs,
             max_budget,
             unchecked,
+            tags,
             labels,
         };
 
@@ -1018,8 +1162,97 @@ impl Disponent {
             stream: self.core.events(Some(event_options_arg)).map_err(rberr)?,
         })
     }
-    fn send(&self, session_uid: String, input: String) -> Result<(), Error> {
-        self.core.send(session_uid, input).map_err(rberr)
+    /// The one messaging primitive (notes/manager-worker-comms.md §6). A Manager
+    /// `to` names a tagged worker subset (fan-out) or the user; recipients resolve
+    /// at send time to a concrete list (a snapshot, never kept live). One Message
+    /// is minted per matched session, all sharing a freshly minted `fanoutId`;
+    /// `topic` (optional) is the supersession key for latest-wins (§7). Returns the
+    /// Messages minted. Delivery is the reader's `events` pull; a message to a
+    /// concrete live worker is also delivered best-effort to its prompt on an
+    /// interact-capable env (the legacy `send` behavior, now one backend delivery).
+    /// Worker self-send (recipient forced to the Manager) is a worker-role MCP
+    /// concern, deferred — the core send is the Manager surface.
+    fn send(&self, args: &[magnus::Value]) -> Result<magnus::RArray, Error> {
+        let a = magnus::scan_args::scan_args::<
+            (String,),
+            (
+                Option<Vec<String>>,
+                Option<Vec<String>>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+            (),
+            (),
+            (),
+            (),
+        >(args)?;
+        let (body,) = a.required;
+        let (tags, sessions, user, in_reply_to, topic) = a.optional;
+        let send_target_arg = SendTarget {
+            tags,
+            sessions,
+            user,
+        };
+
+        let out = self
+            .core
+            .send(Some(send_target_arg), body, in_reply_to, topic)
+            .map_err(rberr)?;
+        let ruby = Ruby::get().map_err(|e| rberr(e))?;
+        let ary = ruby.ary_new();
+        for v in out {
+            ary.push(v)?;
+        }
+        Ok(ary)
+    }
+    /// Acknowledge a message you received (received/handled): stamps `ackedAt`,
+    /// which the Manager observes across a `fanoutId` to see "N of M acted" (§7).
+    /// Idempotent.
+    fn ack(&self, message_id: String) -> Result<(), Error> {
+        self.core.ack(message_id).map_err(rberr)
+    }
+    /// Read Messages, filtered. The Manager's fan-out ack-progress view
+    /// (`{fanoutId}`) and a recipient's inbox (`{recipient, sessionUid}`, optionally
+    /// `latestPerTopic` for the read-side latest-wins collapse, §7).
+    fn messages(&self, args: &[magnus::Value]) -> Result<magnus::RArray, Error> {
+        let a = magnus::scan_args::scan_args::<
+            (),
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<bool>,
+            ),
+            (),
+            (),
+            (),
+            (),
+        >(args)?;
+        let (fanout_id, recipient, session_uid, topic, latest_per_topic) = a.optional;
+        let recipient = recipient
+            .map(|s| Party::parse(&s))
+            .transpose()
+            .map_err(rberr)?;
+        let messages_filter_arg = MessagesFilter {
+            fanout_id,
+            recipient,
+            session_uid,
+            topic,
+            latest_per_topic,
+        };
+
+        let out = self
+            .core
+            .messages(Some(messages_filter_arg))
+            .map_err(rberr)?;
+        let ruby = Ruby::get().map_err(|e| rberr(e))?;
+        let ary = ruby.ary_new();
+        for v in out {
+            ary.push(v)?;
+        }
+        Ok(ary)
     }
     fn cancel(&self, session_uid: String) -> Result<Session, Error> {
         self.core.cancel(session_uid).map_err(rberr)
@@ -1109,6 +1342,17 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     c.define_method("kind", method!(Event::get_kind, 0))?;
     c.define_method("fidelity", method!(Event::get_fidelity, 0))?;
     c.define_method("payload", method!(Event::get_payload, 0))?;
+    let c = class.define_class("Message", ruby.class_object())?;
+    c.define_method("id", method!(Message::get_id, 0))?;
+    c.define_method("created_at", method!(Message::get_created_at, 0))?;
+    c.define_method("sender", method!(Message::get_sender, 0))?;
+    c.define_method("recipient", method!(Message::get_recipient, 0))?;
+    c.define_method("session_uid", method!(Message::get_session_uid, 0))?;
+    c.define_method("body", method!(Message::get_body, 0))?;
+    c.define_method("in_reply_to", method!(Message::get_in_reply_to, 0))?;
+    c.define_method("fanout_id", method!(Message::get_fanout_id, 0))?;
+    c.define_method("topic", method!(Message::get_topic, 0))?;
+    c.define_method("acked_at", method!(Message::get_acked_at, 0))?;
     let s = class.define_class("Events", ruby.class_object())?;
     s.define_method("next", method!(Events::next, 0))?;
     let s = class.define_class("DriverPlan", ruby.class_object())?;
@@ -1123,7 +1367,9 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("sessions", method!(Disponent::sessions, -1))?;
     class.define_method("workspace_link", method!(Disponent::workspace_link, 1))?;
     class.define_method("events", method!(Disponent::events, -1))?;
-    class.define_method("send", method!(Disponent::send, 2))?;
+    class.define_method("send", method!(Disponent::send, -1))?;
+    class.define_method("ack", method!(Disponent::ack, 1))?;
+    class.define_method("messages", method!(Disponent::messages, -1))?;
     class.define_method("cancel", method!(Disponent::cancel, 1))?;
     class.define_method("resume", method!(Disponent::resume, 1))?;
     class.define_method("reap", method!(Disponent::reap, 1))?;

@@ -11,6 +11,10 @@ using Fluessig;
 /** Disponent-minted identifier (UUIDv7). */
 scalar DispatchId extends string;
 scalar SessionUid extends string;
+/** Disponent-minted message id (UUIDv7). */
+scalar MessageId extends string;
+/** Disponent-minted fan-out id (UUIDv7): one broadcast, shared by its N Messages. */
+scalar FanoutId extends string;
 /** Money in integer cents, USD. */
 scalar Cents extends int64;
 
@@ -76,6 +80,13 @@ enum EventKind {
   usage,
   artifact,
   raw,
+  mail, // a control-plane Message landed on this session's timeline
+}
+/** The three principals a message can move between (manager↔worker comms). */
+enum Party {
+  manager, // the managing agent/human that dispatched the session
+  worker, // a dispatched, leaf-node agent
+  user, // the human above the Manager (escalation target)
 }
 enum Fidelity {
   exact,
@@ -203,6 +214,12 @@ model Dispatch {
   /** MCP recursion depth: 0 = dispatched by the host program. */
   viaMcpDepth: int32 = 0;
 
+  /** Selection tags — the PRIMARY handle the Manager addresses a message
+   * fan-out to (notes/manager-worker-comms.md §8). A session inherits its
+   * dispatch's tags. Flat strings, indexable; distinct from the opaque
+   * `labels: Json`, which stays for arbitrary consumer metadata. */
+  tags?: string[];
+
   /** Consumer labels, opaque to disponent. */
   labels?: Json;
 }
@@ -257,6 +274,7 @@ union EventPayload {
   usage: UsageDelta,
   artifact: ArtifactRef,
   raw: RawObservation,
+  mail: MailRef,
 }
 model StateChange {
   from: SessionState;
@@ -286,6 +304,16 @@ model UsageDelta {
 }
 model ArtifactRef {
   artifactIdx: int64;
+}
+/** Pointer + the fields a reader needs to triage a `mail` event without
+ * fetching the Message: direction (sender/recipient), the fan-out it belongs
+ * to, and its topic (so a reader can group by topic for latest-wins). */
+model MailRef {
+  messageId: MessageId;
+  sender: Party;
+  recipient: Party;
+  fanoutId: FanoutId;
+  topic?: string;
 }
 model RawObservation {
   source: string;
@@ -317,6 +345,50 @@ model Usage {
   costCents: Cents = 0;
 }
 
+/** One message dropped in one inbox — the manager↔worker communication
+ * primitive (notes/manager-worker-comms.md). The Manager mints these addressed
+ * to a worker or the user; a worker mints them addressed (implicitly) to its
+ * Manager. Disponent owns these rows — no environment backs them, so reconcile
+ * skips them and durability is the SQLite mirror (design §11). */
+@entity
+@name("messages")
+model Message {
+  @key id: MessageId;
+  createdAt: utcDateTime;
+
+  sender: Party;
+  recipient: Party;
+
+  /** The worker session this message rides. EVERY message anchors to exactly
+   * one session's timeline — that is how both parties pull it via `events`:
+   * a Manager→worker note rides the recipient's timeline, a worker→Manager
+   * question rides the sender's, a Manager→user escalation rides the timeline
+   * of the worker it is about. */
+  @fk(#["session_uid"]) session: Session;
+
+  /** The payload — free-form text, like the brief. Structure is the consumer's. */
+  body: string;
+
+  /** Threading: the message this one replies to (an answer to a question, an
+   * escalation of a worker's message). Null for an unsolicited directive.
+   * Walking `inReplyTo` reconstructs a question's whole life — no status enum. */
+  @fk(#["in_reply_to"]) inReplyTo?: Message;
+
+  /** One logical Manager broadcast → N Messages that all share this id. A
+   * single-recipient send still gets one (a fan-out of one). Counting acks over
+   * a `fanoutId` is how the Manager sees "N of M picked up the directive." */
+  fanoutId: FanoutId;
+
+  /** Supersession key. A newer fan-out carrying the same `topic` supersedes
+   * older same-topic messages in an inbox: a reader acts on the LATEST message
+   * per (recipient, topic) and skips the stale ones. Null = standalone. */
+  topic?: string;
+
+  /** Stamped by the recipient's `ack`: received/handled. Manager-observable.
+   * Null = delivered (readable on the feed) but not yet acknowledged. */
+  ackedAt?: utcDateTime;
+}
+
 // ── DTOs (op-surface value structs) ──
 model OpenOptions {
   configPath?: string;
@@ -346,6 +418,9 @@ model DispatchSpec {
   /** Skip catalog validation of (env, agent, model); the env's own error becomes the report. */
   unchecked?: boolean;
 
+  /** Selection tags a message fan-out can address this session by (§8). */
+  tags?: string[];
+
   labels?: Json;
 }
 model SessionFilter {
@@ -369,6 +444,42 @@ model EventOptions {
   sessionUid?: SessionUid;
   afterIdx?: int64;
   kinds?: EventKind[];
+}
+
+/** Where a Manager-sent message goes. A worker never fills this: the
+ * worker-role server defaults recipient = its Manager, anchored to the bound
+ * session (deferred to the MCP layer). A Manager sets exactly one destination. */
+model SendTarget {
+  /** PRIMARY (§8): every live session whose dispatch carries any of these tags.
+   * `tags:["projectA"]` reaches all projectA workers without enumerating uids.
+   * Resolved to concrete recipients at send time (a snapshot, never kept live). */
+  tags?: string[];
+
+  /** Precise fallback: exact recipients by session uid. */
+  sessions?: SessionUid[];
+
+  /** Escalate to the human above the Manager, about this worker session (§10). */
+  user?: SessionUid;
+}
+
+/** Filter for the `messages` read. Absent fields don't constrain. */
+model MessagesFilter {
+  /** All Messages of one fan-out — the Manager's ack-progress view. */
+  fanoutId?: FanoutId;
+
+  /** Only messages addressed to this party (inbox scoping). */
+  recipient?: Party;
+
+  /** Only messages anchored to this session's timeline. */
+  sessionUid?: SessionUid;
+
+  /** Only messages carrying this topic. */
+  topic?: string;
+
+  /** Collapse to the newest message per (recipient, topic) in scope — the
+   * read-side latest-wins convention (§7). Standalone (null-topic) messages
+   * are always kept. */
+  latestPerTopic?: boolean;
 }
 model ReconcileReport {
   adopted: int32;
@@ -432,7 +543,28 @@ interface Disponent {
   @readonly workspaceLink(sessionUid: SessionUid): WorkspaceLink;
   @readonly @stream events(options?: EventOptions): Event;
 
-  send(sessionUid: SessionUid, input: string): void;
+  /** The one messaging primitive (notes/manager-worker-comms.md §6). A Manager
+   * `to` names a tagged worker subset (fan-out) or the user; recipients resolve
+   * at send time to a concrete list (a snapshot, never kept live). One Message
+   * is minted per matched session, all sharing a freshly minted `fanoutId`;
+   * `topic` (optional) is the supersession key for latest-wins (§7). Returns the
+   * Messages minted. Delivery is the reader's `events` pull; a message to a
+   * concrete live worker is also delivered best-effort to its prompt on an
+   * interact-capable env (the legacy `send` behavior, now one backend delivery).
+   * Worker self-send (recipient forced to the Manager) is a worker-role MCP
+   * concern, deferred — the core send is the Manager surface. */
+  send(to?: SendTarget, body: string, inReplyTo?: MessageId, topic?: string): Message[];
+
+  /** Acknowledge a message you received (received/handled): stamps `ackedAt`,
+   * which the Manager observes across a `fanoutId` to see "N of M acted" (§7).
+   * Idempotent. */
+  ack(messageId: MessageId): void;
+
+  /** Read Messages, filtered. The Manager's fan-out ack-progress view
+   * (`{fanoutId}`) and a recipient's inbox (`{recipient, sessionUid}`, optionally
+   * `latestPerTopic` for the read-side latest-wins collapse, §7). */
+  @readonly messages(filter?: MessagesFilter): Message[];
+
   @destructive cancel(sessionUid: SessionUid): Session;
   resume(sessionUid: SessionUid): Session;
   @destructive reap(sessionUid: SessionUid): Session;
