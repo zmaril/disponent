@@ -1,8 +1,10 @@
 //! The local backend: run the agent on this machine, in tmux — the same
 //! shape as an exe.dev worker but the "environment" is a managed work dir
-//! plus a `tmux -L disponent` session named after the session uid. Cancel
-//! kills the tmux session and keeps the work dir for inspection; reap
-//! removes the work dir too. Survey lists the tmux sessions, so reconcile
+//! plus a `tmux -L disponent` session named after the session uid. START sets
+//! the work dir up and opens a shell; the engine then launches the agent into
+//! that shell (its [`Compute`] surface). `stop_work` interrupts the agent,
+//! `stop_exec` kills the tmux session and keeps the work dir for inspection;
+//! REAP removes the work dir too. Survey lists the tmux sessions, so reconcile
 //! adopts local runs a previous disponent left behind.
 
 use std::path::PathBuf;
@@ -11,11 +13,14 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context};
 use serde_json::json;
 
-use crate::backend::{run_argv, shq, EnvBackend, Provision, ProvisionRequest};
+use crate::backend::{
+    run_argv, shq, Compute, EnvProvider, Provision, StartRequest, TemplateHandle, TemplateSpec,
+};
 
 /// tmux session names for disponent workers: `dsp-<session uid>`.
 const SESSION_PREFIX: &str = "dsp-";
 
+#[derive(Clone)]
 pub struct LocalTmux {
     /// The tmux socket name (`tmux -L …`) — separate from the user's own server.
     socket: String,
@@ -85,6 +90,7 @@ impl LocalTmux {
     }
 
     /// A snapshot of the worker's terminal (poll-grade observation, scraped).
+    /// Kept as an inherent method so tests can probe a handle directly.
     pub fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String> {
         if self.dry_run {
             return Ok(String::new());
@@ -118,7 +124,7 @@ fn local_git_repo(repo: &str) -> Option<PathBuf> {
     canon.join(".git").exists().then_some(canon)
 }
 
-impl EnvBackend for LocalTmux {
+impl EnvProvider for LocalTmux {
     fn kind(&self) -> &'static str {
         "local"
     }
@@ -127,12 +133,21 @@ impl EnvBackend for LocalTmux {
         false
     }
 
-    fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<Provision> {
-        let mut handle = self.handle(&req.session_uid);
+    fn ensure_template(&self, spec: &TemplateSpec) -> anyhow::Result<TemplateHandle> {
+        // Local runs on this machine — there's no image to build, so TEMPLATE is
+        // an honest no-op that names the (unused) template through.
+        Ok(TemplateHandle {
+            name: spec.name.clone(),
+        })
+    }
+
+    fn start(&self, req: &StartRequest) -> anyhow::Result<Provision> {
+        let handle = self.handle(&req.session_uid);
         if self.dry_run {
             return Ok(Provision { handle, url: None });
         }
 
+        let mut handle = handle;
         let work = self.root.join(&req.session_uid);
         let task = work.join("task");
         std::fs::create_dir_all(&task).with_context(|| format!("mkdir {}", task.display()))?;
@@ -151,13 +166,14 @@ impl EnvBackend for LocalTmux {
             Ok(())
         };
 
-        // clone (or worktree) → setup → agent, the same order as the remote
-        // bootstrap. `isolation: "worktree"` on a LOCAL git repo adds a
-        // worktree off it instead of cloning; a fresh branch per session
-        // (`disponent/<uid>`, unique because uids are UUIDv7) keeps it isolated
-        // and removable on reap. A worktree requested against a remote repo
-        // can't apply — a fresh clone is still an isolated dir, so fall through
-        // honestly rather than pretend it's a worktree.
+        // clone (or worktree) → setup, the same order as the remote setup. The
+        // agent is NOT launched here — the engine `spawn`s it onto the shell this
+        // opens. `isolation: "worktree"` on a LOCAL git repo adds a worktree off
+        // it instead of cloning; a fresh branch per session (`disponent/<uid>`,
+        // unique because uids are UUIDv7) keeps it isolated and removable on
+        // reap. A worktree requested against a remote repo can't apply — a fresh
+        // clone is still an isolated dir, so fall through honestly rather than
+        // pretend it's a worktree.
         let want_worktree = req.isolation.as_deref() == Some("worktree");
         if let Some(repo) = req.repo.as_deref().filter(|r| !r.is_empty()) {
             match want_worktree.then(|| local_git_repo(repo)).flatten() {
@@ -198,9 +214,10 @@ impl EnvBackend for LocalTmux {
             sh(setup, &task, "setup")?;
         }
 
-        // The runner keeps the brief out of the tmux command string (it's
-        // `cat`-ed at launch), mirroring the remote convention. Telemetry
-        // exports live in the runner so every session gets its own wiring.
+        // The runner opens a shell in the task dir with telemetry wired, then
+        // `exec bash` so the pane stays interactive — the engine's agent launch
+        // rides in as keystrokes afterward (the brief is `cat`-ed at that point,
+        // never on the tmux command string), mirroring the remote convention.
         let otel = req
             .otel_endpoint
             .as_deref()
@@ -209,10 +226,7 @@ impl EnvBackend for LocalTmux {
         let runner = work.join("run.sh");
         std::fs::write(
             &runner,
-            format!(
-                "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")/task\"\n{otel}{} \"$(cat ../brief.md)\" || true\nexec bash\n",
-                self.agent_cmd
-            ),
+            format!("#!/usr/bin/env bash\ncd \"$(dirname \"$0\")/task\"\n{otel}exec bash\n"),
         )?;
         sh(
             &format!("chmod +x {}", shq(&runner.display().to_string())),
@@ -234,34 +248,25 @@ impl EnvBackend for LocalTmux {
         Ok(Provision { handle, url: None })
     }
 
-    fn stop(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
-        if self.dry_run {
-            return Ok(());
-        }
-        let name = handle["tmux"]
-            .as_str()
-            .ok_or_else(|| anyhow!("handle has no 'tmux': {handle}"))?;
-        // Already-gone is stopped enough.
-        let _ = self.tmux(&["kill-session", "-t", name]);
-        Ok(())
+    fn compute(&self, handle: &serde_json::Value) -> anyhow::Result<Box<dyn Compute>> {
+        Ok(Box::new(LocalCompute {
+            dev: self.clone(),
+            handle: handle.clone(),
+        }))
     }
 
-    fn send(&self, handle: &serde_json::Value, input: &str) -> anyhow::Result<()> {
-        if self.dry_run {
-            return Ok(());
-        }
-        let name = handle["tmux"]
-            .as_str()
-            .ok_or_else(|| anyhow!("handle has no 'tmux': {handle}"))?;
-        self.tmux(&["send-keys", "-t", name, "-l", input])?;
-        self.tmux(&["send-keys", "-t", name, "Enter"]).map(|_| ())
+    fn agent_launch_cmd(&self, _req: &StartRequest) -> Option<String> {
+        // PR-2: AgentAdapter will own install/auth/start/prompt/monitor/output/
+        // stopWork/stopExec. For now the launch is the same line the runner used
+        // to bake in — the agent with the brief `cat`-ed from the work dir — and
+        // the engine `spawn`s it (as keystrokes) into the shell START opened.
+        Some(format!("{} \"$(cat ../brief.md)\"", self.agent_cmd))
     }
 
-    fn teardown(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
+    fn reap(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
         if self.dry_run {
             return Ok(());
         }
-        self.stop(handle)?;
         if let Some(dir) = handle["workDir"].as_str() {
             // Only remove dirs we manage — never follow a doctored handle
             // outside the root.
@@ -285,20 +290,6 @@ impl EnvBackend for LocalTmux {
             }
         }
         Ok(())
-    }
-
-    fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String> {
-        LocalTmux::capture(self, handle)
-    }
-
-    fn workspace_link(&self, handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
-        // The agent runs in <workDir>/task (provision creates and cds there),
-        // so that's what the editor should open. A doctored/absent handle
-        // yields no link rather than a panic.
-        let Some(work_dir) = handle["workDir"].as_str() else {
-            return Ok(None);
-        };
-        Ok(Some(format!("vscode://file{work_dir}/task")))
     }
 
     /// Diff the session's work dir to see whether it shipped anything. The task
@@ -364,6 +355,102 @@ impl EnvBackend for LocalTmux {
     }
 }
 
+/// The INTERACT surface for one local worker: a clone of the backend config
+/// plus the worker's handle (its `tmux` session name + `workDir`).
+struct LocalCompute {
+    dev: LocalTmux,
+    handle: serde_json::Value,
+}
+
+impl LocalCompute {
+    fn session(&self) -> anyhow::Result<&str> {
+        self.handle["tmux"]
+            .as_str()
+            .ok_or_else(|| anyhow!("handle has no 'tmux': {}", self.handle))
+    }
+
+    /// Type a line into the pane and press Enter — the shared mechanism for
+    /// spawning the agent and for relaying supervisor input.
+    fn send_line(&self, line: &str) -> anyhow::Result<()> {
+        if self.dev.dry_run {
+            return Ok(());
+        }
+        let name = self.session()?;
+        self.dev.tmux(&["send-keys", "-t", name, "-l", line])?;
+        self.dev
+            .tmux(&["send-keys", "-t", name, "Enter"])
+            .map(|_| ())
+    }
+}
+
+impl Compute for LocalCompute {
+    fn run(&self, cmd: &str) -> anyhow::Result<String> {
+        if self.dev.dry_run {
+            return Ok(String::new());
+        }
+        // One-shot in the session's task dir (the agent's working directory).
+        let task = self
+            .handle
+            .get("workDir")
+            .and_then(|d| d.as_str())
+            .map(|d| PathBuf::from(d).join("task"))
+            .ok_or_else(|| anyhow!("handle has no 'workDir': {}", self.handle))?;
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&task)
+            .output()
+            .map_err(|e| anyhow!("run: spawn bash: {e}"))?;
+        if !out.status.success() {
+            bail!("run: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn spawn(&self, cmd: &str) -> anyhow::Result<()> {
+        // Launch the agent as a foreground process in the pane's shell.
+        self.send_line(cmd)
+    }
+
+    fn send(&self, input: &str) -> anyhow::Result<()> {
+        self.send_line(input)
+    }
+
+    fn capture(&self) -> anyhow::Result<String> {
+        LocalTmux::capture(&self.dev, &self.handle)
+    }
+
+    fn stop_work(&self) -> anyhow::Result<()> {
+        if self.dev.dry_run {
+            return Ok(());
+        }
+        // Interrupt the agent (C-c); the pane's shell survives and the work dir
+        // is untouched.
+        let name = self.session()?;
+        self.dev.tmux(&["send-keys", "-t", name, "C-c"]).map(|_| ())
+    }
+
+    fn stop_exec(&self) -> anyhow::Result<()> {
+        if self.dev.dry_run {
+            return Ok(());
+        }
+        let name = self.session()?;
+        // Already-gone is stopped enough.
+        let _ = self.dev.tmux(&["kill-session", "-t", name]);
+        Ok(())
+    }
+
+    fn workspace_link(&self) -> anyhow::Result<Option<String>> {
+        // The agent runs in <workDir>/task (START creates and cds there), so
+        // that's what the editor should open. A doctored/absent handle yields no
+        // link rather than a panic.
+        let Some(work_dir) = self.handle["workDir"].as_str() else {
+            return Ok(None);
+        };
+        Ok(Some(format!("vscode://file{work_dir}/task")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +471,26 @@ mod tests {
         let h = b.handle("abc-123");
         assert_eq!(h["tmux"], "dsp-abc-123");
         assert!(h["workDir"].as_str().unwrap().ends_with("abc-123"));
+    }
+
+    #[test]
+    fn agent_launch_cats_the_brief() {
+        // The engine spawns this onto the shell START opened; it must carry the
+        // brief in from the work dir, not on the tmux command string.
+        let b = LocalTmux::sandboxed("s", PathBuf::from("/tmp/x"), "myagent --flag");
+        let req = StartRequest {
+            session_uid: "u".into(),
+            template: None,
+            repo: None,
+            isolation: None,
+            git_ref: None,
+            setup: None,
+            brief: "b".into(),
+            otel_endpoint: None,
+        };
+        assert_eq!(
+            b.agent_launch_cmd(&req).unwrap(),
+            "myagent --flag \"$(cat ../brief.md)\""
+        );
     }
 }

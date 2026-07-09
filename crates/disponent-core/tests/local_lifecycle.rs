@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use disponent_core::backend::EnvBackend;
+use disponent_core::backend::EnvProvider;
 use disponent_core::local::LocalTmux;
 use disponent_core::mcp_generated::{DispatchSpec, DisponentMcp, Session};
 use disponent_core::Engine;
@@ -327,7 +327,7 @@ fn fresh_engine_adopts_a_local_survivor() {
     assert_eq!((again.adopted, again.confirmed), (0, 1));
 
     second.reap(session.uid).unwrap();
-    let probe: Arc<dyn EnvBackend> =
+    let probe: Arc<dyn EnvProvider> =
         Arc::new(LocalTmux::sandboxed(&socket, root.clone(), FAKE_AGENT));
     assert!(probe.survey().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&root);

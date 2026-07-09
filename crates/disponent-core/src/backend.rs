@@ -1,20 +1,40 @@
-//! The exe.dev backend (the powdermonkey extraction): provision a throwaway
-//! worker VM per session by copying an already-authed template VM, clone the
-//! repo, run the setup chain, launch the agent in tmux, expose it over ttyd.
+//! The env-provider / exec-surface seam.
 //!
-//! Everything shells out to the exe.dev CLI, which is itself just `ssh exe.dev
-//! <cmd>` (and `ssh <vm>.exe.xyz` to reach a worker). Arg-building and the
-//! remote bootstrap script are pure functions so they're unit-tested without
-//! touching the network; only the thin spawn wrappers go untested. `dry_run`
-//! fabricates every result — the engine-level tests run on it.
+//! An environment family (exe.dev VMs, local tmux, …) is split into two
+//! hand-written traits along the lifecycle stages the design names — TEMPLATE,
+//! START, INTERACT, REAP:
+//!
+//! * [`EnvProvider`] owns *where* a process runs: it can create a base image
+//!   (TEMPLATE), stand up a worker with a running shell (START), destroy it
+//!   (REAP), and answer "what's out there" for reconcile. START does **not**
+//!   launch the agent — that is an explicit engine step (PR-1) and will become
+//!   an `AgentAdapter` (PR-2).
+//! * [`Compute`] is the INTERACT surface a running worker exposes — run a
+//!   one-shot command, spawn the long-running agent, type at it, scrape its
+//!   pane, interrupt it, kill it. Obtained from the provider given the worker's
+//!   opaque handle.
+//!
+//! Handles are opaque JSON at the engine level — each backend defines and
+//! parses its own shape.
+//!
+//! This module also carries the exe.dev backend (the powdermonkey extraction):
+//! provision a throwaway worker VM per session by copying an already-authed
+//! template VM, clone the repo, run the setup chain; the engine then launches
+//! the agent in tmux, exposed over ttyd. Everything shells out to the exe.dev
+//! CLI, which is itself just `ssh exe.dev <cmd>` (and `ssh <vm>.exe.xyz` to
+//! reach a worker). Arg-building and the remote scripts are pure functions so
+//! they're unit-tested without touching the network; only the thin spawn
+//! wrappers go untested. `dry_run` fabricates every result — the engine-level
+//! tests run on it.
 
 use std::process::Command;
 
 use anyhow::{anyhow, bail};
 
 /// Everything a worker needs to exist: the template to copy, what to clone,
-/// how to set it up, and the brief the agent starts with.
-pub struct ProvisionRequest {
+/// how to set it up, and the brief the agent starts with. START consumes it to
+/// stand the worker up; the engine reuses it to build the agent-launch command.
+pub struct StartRequest {
     pub session_uid: String,
     /// The env-side base image to copy (exe.dev template VM name); backends
     /// with `requires_template()` reject a dispatch without one.
@@ -42,44 +62,74 @@ pub struct Provisioned {
     pub url: String,
 }
 
-/// One environment family (exe.dev VMs, local tmux, …): provision workers,
-/// poke them, tear them down, and answer "what's out there" for reconcile.
-/// Handles are opaque JSON at the engine level — each backend defines and
-/// parses its own shape.
-pub trait EnvBackend: Send + Sync {
+/// What START hands the engine for a fresh worker: an opaque handle and, where
+/// the env exposes one, a URL onto the worker's terminal.
+pub struct Provision {
+    pub handle: serde_json::Value,
+    pub url: Option<String>,
+}
+
+/// The TEMPLATE stage's request: an env-side base image to build. PR-1 wires no
+/// caller — provisioning still copies a pre-baked template named on the
+/// dispatch — so this exists to name the seam, not to be driven yet.
+pub struct TemplateSpec {
+    pub name: String,
+    pub setup: Option<String>,
+}
+
+/// A handle to an ensured base image (the TEMPLATE stage's result).
+pub struct TemplateHandle {
+    pub name: String,
+}
+
+/// One environment family (exe.dev VMs, local tmux, …): the env owns *where* a
+/// process runs — the four lifecycle stages TEMPLATE, START, INTERACT
+/// ([`Compute`]), REAP.
+pub trait EnvProvider: Send + Sync {
     /// Matches the EnvKind wire value ("exe_dev", "local", …).
     fn kind(&self) -> &'static str;
 
     /// Does dispatch demand a template (an env-side base image to copy)?
     fn requires_template(&self) -> bool;
 
-    fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<Provision>;
+    /// TEMPLATE stage: ensure an env-side base image exists. PR-1 wires no
+    /// caller (provisioning copies a pre-baked template named on the dispatch),
+    /// so a backend that can't build one yet says so rather than faking it.
+    fn ensure_template(&self, _spec: &TemplateSpec) -> anyhow::Result<TemplateHandle> {
+        bail!(
+            "template provisioning isn't implemented for '{}' yet",
+            self.kind()
+        )
+    }
 
-    /// Stop the agent, keep the environment for inspection (cancel's half).
-    fn stop(&self, handle: &serde_json::Value) -> anyhow::Result<()>;
+    /// START stage: env-create + clone + env-level setup, leaving a running
+    /// shell. Does **not** launch the agent — the engine does that as an
+    /// explicit step on the [`Compute`] surface (`agent_launch_cmd`).
+    fn start(&self, req: &StartRequest) -> anyhow::Result<Provision>;
 
-    fn send(&self, handle: &serde_json::Value, input: &str) -> anyhow::Result<()>;
+    /// The INTERACT ([`Compute`]) surface for an existing worker, addressed by
+    /// its opaque handle. send/capture/stop all go through this.
+    fn compute(&self, handle: &serde_json::Value) -> anyhow::Result<Box<dyn Compute>>;
 
-    /// Destroy the environment's resources (reap's half).
-    fn teardown(&self, handle: &serde_json::Value) -> anyhow::Result<()>;
+    /// The command the engine spawns on the fresh shell to launch the agent.
+    /// PR-1 keeps this a backend-built string the engine runs verbatim right
+    /// after START; PR-2's `AgentAdapter` will own install/auth/start/prompt/
+    /// monitor/output/stopWork/stopExec. `None` = a pure-shell env with no
+    /// agent to launch.
+    fn agent_launch_cmd(&self, _req: &StartRequest) -> Option<String> {
+        None
+    }
+
+    /// REAP stage (was `teardown`): destroy the environment's resources.
+    fn reap(&self, handle: &serde_json::Value) -> anyhow::Result<()>;
 
     /// The sessions discoverable in the environment right now, as
     /// (session_uid, handle) — what reconcile confirms/adopts against.
     fn survey(&self) -> anyhow::Result<Vec<(String, serde_json::Value)>>;
 
-    /// A snapshot of the worker's terminal (poll-grade observation, scraped).
-    fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String>;
-
-    /// An editor deep-link into this session's working directory, if the backend
-    /// can honestly provide one for the caller's machine. `None` = no honest link
-    /// (a remote env's files aren't on this machine, so we never fake one).
-    fn workspace_link(&self, _handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
-        Ok(None)
-    }
-
     /// Delivery assessment: did this session actually ship a diff, or exit
     /// having changed nothing? Answered while the env is still live (the engine
-    /// calls it at reap, before teardown).
+    /// calls it at reap, before REAP tears the worker down).
     ///
     /// Honest by construction: `None` means this backend can't diff the work
     /// dir — a coarse env with no visible file system to compare — so the
@@ -92,10 +142,37 @@ pub trait EnvBackend: Send + Sync {
     }
 }
 
-/// What a backend hands the engine for a fresh worker.
-pub struct Provision {
-    pub handle: serde_json::Value,
-    pub url: Option<String>,
+/// The INTERACT stage a running env exposes. In PR-1 the engine drives it
+/// directly (agent launch is a hardcoded engine step, `spawn`ed here); PR-2
+/// will move that behind an `AgentAdapter`.
+///
+/// `Send` so a terminal watcher can hold one on its observer thread.
+pub trait Compute: Send {
+    /// One-shot blocking command in the worker's working directory.
+    fn run(&self, cmd: &str) -> anyhow::Result<String>;
+
+    /// Launch a long-running foreground process in the worker's pane (the
+    /// agent). After this, `capture`/`send`/`stop_*` all target it.
+    fn spawn(&self, cmd: &str) -> anyhow::Result<()>;
+
+    /// Type keystrokes at the running process (was `EnvBackend::send`).
+    fn send(&self, input: &str) -> anyhow::Result<()>;
+
+    /// A snapshot of the worker's terminal (poll-grade observation, scraped).
+    fn capture(&self) -> anyhow::Result<String>;
+
+    /// Interrupt the running process (e.g. `C-c`) — the process STAYS alive
+    /// (its shell returns to a prompt); the env is untouched.
+    fn stop_work(&self) -> anyhow::Result<()>;
+
+    /// Kill the running process (was `EnvBackend::stop`'s effect) — the env
+    /// stays for inspection; REAP is what destroys it.
+    fn stop_exec(&self) -> anyhow::Result<()>;
+
+    /// An editor deep-link into this session's working directory, if the env
+    /// can honestly provide one for the caller's machine. `None` = no honest
+    /// link (a remote env's files aren't on this machine, so we never fake one).
+    fn workspace_link(&self) -> anyhow::Result<Option<String>>;
 }
 
 fn handle_str(handle: &serde_json::Value, key: &str) -> anyhow::Result<String> {
@@ -105,7 +182,7 @@ fn handle_str(handle: &serde_json::Value, key: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("handle has no '{key}': {handle}"))
 }
 
-impl EnvBackend for ExeDev {
+impl EnvProvider for ExeDev {
     fn kind(&self) -> &'static str {
         "exe_dev"
     }
@@ -114,24 +191,31 @@ impl EnvBackend for ExeDev {
         true
     }
 
-    fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<Provision> {
+    fn start(&self, req: &StartRequest) -> anyhow::Result<Provision> {
         // (inherent method — resolution prefers it over this trait method)
-        let p = ExeDev::provision(self, req)?;
+        let p = ExeDev::start(self, req)?;
         Ok(Provision {
             handle: serde_json::json!({"vmName": p.vm_name, "host": p.host}),
             url: Some(p.url),
         })
     }
 
-    fn stop(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
-        ExeDev::stop(self, &handle_str(handle, "host")?)
+    fn compute(&self, handle: &serde_json::Value) -> anyhow::Result<Box<dyn Compute>> {
+        Ok(Box::new(ExeCompute {
+            dev: self.clone(),
+            handle: handle.clone(),
+        }))
     }
 
-    fn send(&self, handle: &serde_json::Value, input: &str) -> anyhow::Result<()> {
-        ExeDev::send(self, &handle_str(handle, "host")?, input)
+    fn agent_launch_cmd(&self, req: &StartRequest) -> Option<String> {
+        // PR-2: AgentAdapter will own install/auth/start/prompt/monitor/output/
+        // stopWork/stopExec. For now the launch is a remote bootstrap the engine
+        // `spawn`s onto the started worker — it writes the run script, opens the
+        // agent in a detached `worker` tmux session, and exposes it over ttyd.
+        Some(launch_script(self, req))
     }
 
-    fn teardown(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
+    fn reap(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
         ExeDev::teardown(self, &handle_str(handle, "vmName")?)
     }
 
@@ -152,20 +236,67 @@ impl EnvBackend for ExeDev {
             })
             .collect())
     }
+}
 
-    fn capture(&self, handle: &serde_json::Value) -> anyhow::Result<String> {
-        ExeDev::capture(self, &handle_str(handle, "host")?)
+/// The INTERACT surface for one exe.dev worker: a clone of the backend config
+/// plus the worker's handle (its `host` is the ssh target).
+struct ExeCompute {
+    dev: ExeDev,
+    handle: serde_json::Value,
+}
+
+impl ExeCompute {
+    fn host(&self) -> anyhow::Result<String> {
+        handle_str(&self.handle, "host")
+    }
+}
+
+impl Compute for ExeCompute {
+    fn run(&self, cmd: &str) -> anyhow::Result<String> {
+        if self.dev.dry_run {
+            return Ok(String::new());
+        }
+        self.dev.worker(&self.host()?, &[cmd], None)
     }
 
-    fn workspace_link(&self, handle: &serde_json::Value) -> anyhow::Result<Option<String>> {
+    fn spawn(&self, cmd: &str) -> anyhow::Result<()> {
+        if self.dev.dry_run {
+            return Ok(());
+        }
+        // The launch rides `bash -s` on the worker (it's the remote bootstrap).
+        self.dev
+            .worker(&self.host()?, &["bash", "-s"], Some(cmd))
+            .map(|_| ())
+    }
+
+    fn send(&self, input: &str) -> anyhow::Result<()> {
+        ExeDev::send(&self.dev, &self.host()?, input)
+    }
+
+    fn capture(&self) -> anyhow::Result<String> {
+        ExeDev::capture(&self.dev, &self.host()?)
+    }
+
+    fn stop_work(&self) -> anyhow::Result<()> {
+        // Interrupt the agent in its pane; the pane (and VM) stay.
+        self.dev
+            .worker_tmux(&self.host()?, &["send-keys", "-t", "worker", "C-c"])
+            .map(|_| ())
+    }
+
+    fn stop_exec(&self) -> anyhow::Result<()> {
+        ExeDev::stop(&self.dev, &self.host()?)
+    }
+
+    fn workspace_link(&self) -> anyhow::Result<Option<String>> {
         // The worker's files live on the VM, not this machine — the honest link
         // is a VS Code Remote-SSH one that opens the dir over ssh to the VM.
-        let Some(host) = handle_str(handle, "host").ok().filter(|h| !h.is_empty()) else {
+        let Some(host) = self.host().ok().filter(|h| !h.is_empty()) else {
             return Ok(None);
         };
         // Dry-run must never touch the network; hand back a representative link
         // with a fabricated home so the shape is exercised end-to-end.
-        if self.dry_run {
+        if self.dev.dry_run {
             return Ok(Some(remote_uri(&host, "/root/work/task")));
         }
         // Resolve the ABSOLUTE remote work dir with one ssh probe ($HOME isn't
@@ -174,6 +305,7 @@ impl EnvBackend for ExeDev {
         // argv with spaces and the login shell re-parse it, so splitting it into
         // `sh -lc <cmd>` would make `-lc` swallow only `cd` and print $HOME.
         let out = self
+            .dev
             .worker(&host, &["cd \"$HOME/work/task\" 2>/dev/null && pwd"], None)
             .map_err(|err| {
                 anyhow!("couldn't resolve remote working dir over ssh to {host}: {err}")
@@ -203,6 +335,7 @@ pub struct Vm {
     pub tags: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct ExeDev {
     ssh: String,
     /// The control endpoint (`ssh <control> cp|tag|rm|ls`).
@@ -277,9 +410,11 @@ impl ExeDev {
         format!("{vm_name}{}", self.host_suffix)
     }
 
-    /// Copy the template, tag it, wait for sshd, push the brief, bootstrap.
-    /// Each step early-exits with a stage-prefixed error.
-    pub fn provision(&self, req: &ProvisionRequest) -> anyhow::Result<Provisioned> {
+    /// START: copy the template, tag it, wait for sshd, push the brief, run the
+    /// env setup (clone + dispatch setup). Leaves a reachable worker with the
+    /// repo in place — but NOT the agent; the engine launches that afterward via
+    /// `agent_launch_cmd`. Each step early-exits with a stage-prefixed error.
+    pub fn start(&self, req: &StartRequest) -> anyhow::Result<Provisioned> {
         let vm_name = worker_name(req.repo.as_deref(), &req.session_uid);
         let host = self.host(&vm_name);
         let url = format!("https://{host}:{}/", self.ttyd_port);
@@ -325,7 +460,8 @@ impl ExeDev {
             bail!("worker {host} never came up");
         }
 
-        // The brief rides stdin (no scp temp-file dance; it can be large).
+        // The brief rides stdin (no scp temp-file dance; it can be large). It
+        // lands before the agent launch that `cat`s it.
         self.worker(
             &host,
             &["bash", "-c", "cat > /tmp/disponent-brief.md"],
@@ -333,13 +469,13 @@ impl ExeDev {
         )
         .map_err(|e| anyhow!("push brief: {e}"))?;
 
-        self.worker(&host, &["bash", "-s"], Some(&bootstrap_script(self, req)))
-            .map_err(|e| anyhow!("worker bootstrap: {e}"))?;
+        self.worker(&host, &["bash", "-s"], Some(&setup_script(req)))
+            .map_err(|e| anyhow!("worker setup: {e}"))?;
 
         Ok(Provisioned { vm_name, host, url })
     }
 
-    /// Delete a worker VM.
+    /// Delete a worker VM (REAP).
     pub fn teardown(&self, vm_name: &str) -> anyhow::Result<()> {
         if self.dry_run {
             return Ok(());
@@ -366,21 +502,21 @@ impl ExeDev {
         self.worker(host, &args, None)
     }
 
-    /// Stop the agent (kill its tmux session) but leave the VM for inspection —
-    /// cancel's half of the cancel/reap split; reap is what deletes the VM.
-    pub fn stop(&self, host: &str) -> anyhow::Result<()> {
+    /// Kill the agent's tmux session but leave the VM for inspection — the
+    /// `stop_exec` half. REAP is what deletes the VM.
+    fn stop(&self, host: &str) -> anyhow::Result<()> {
         self.worker_tmux(host, &["kill-session", "-t", "worker"])
             .map(|_| ())
     }
 
     /// Type into the worker's tmux session (the agent's terminal).
-    pub fn send(&self, host: &str, input: &str) -> anyhow::Result<()> {
+    fn send(&self, host: &str, input: &str) -> anyhow::Result<()> {
         self.worker_tmux(host, &["send-keys", "-t", "worker", input, "Enter"])
             .map(|_| ())
     }
 
     /// A snapshot of the worker's terminal (poll-grade observation, scraped).
-    pub fn capture(&self, host: &str) -> anyhow::Result<String> {
+    fn capture(&self, host: &str) -> anyhow::Result<String> {
         self.worker_tmux(host, &["capture-pane", "-p", "-t", "worker"])
     }
 }
@@ -453,26 +589,14 @@ pub fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// The remote `bash -s` script that turns a fresh worker into a running
-/// session, in the design's setup order: the template's baseline already ran
-/// (it's baked into the image), then the repo clone, then the dispatch's
-/// setup, then the agent in a detached tmux session exposed over ttyd.
-/// Injected values are single-quoted (shq) so a repo slug or setup line can't
-/// break out of its assignment; the brief is `cat`-ed at run time so it never
-/// rides a tmux command string.
-pub fn bootstrap_script(backend: &ExeDev, req: &ProvisionRequest) -> String {
-    let otel_block = req
-        .otel_endpoint
-        .as_deref()
-        .map(|e| crate::otel::worker_env(e, &req.session_uid))
-        .unwrap_or_default();
-    let header = [
-        format!("REPO_SLUG={}", shq(req.repo.as_deref().unwrap_or(""))),
-        format!("CLAUDE_FLAGS={}", shq(&backend.claude_flags)),
-        format!("TTYD_PORT={}", shq(&backend.ttyd_port.to_string())),
-        format!("OTEL_BLOCK={}", shq(&otel_block)),
-    ]
-    .join("\n");
+/// The remote `bash -s` script that stands a fresh worker up to the point of a
+/// cloned, set-up work dir — but NOT the agent. In the design's setup order:
+/// the template's baseline already ran (baked into the image), then the repo
+/// clone, then the dispatch's setup. Injected values are single-quoted (shq) so
+/// a repo slug can't break out of its assignment; the agent launch is a
+/// separate script (`launch_script`) the engine runs afterward.
+pub fn setup_script(req: &StartRequest) -> String {
+    let header = format!("REPO_SLUG={}", shq(req.repo.as_deref().unwrap_or("")));
     // The dispatch setup runs verbatim as its own block (it's the operator's
     // script, not a quoted value) — after the clone, inside the work dir.
     let setup = req.setup.as_deref().unwrap_or("");
@@ -488,7 +612,31 @@ else
 fi
 cd "$work"
 "#;
-    let launch = r#"
+    format!("{header}\n{body}\n# ── dispatch setup ──\n{setup}\n")
+}
+
+/// The remote `bash -s` script that launches the agent on an already-started
+/// worker: write the run script, open the agent in a detached `worker` tmux
+/// session (the brief is `cat`-ed at run time so it never rides a tmux command
+/// string), and expose it over ttyd. The engine `spawn`s this after START.
+///
+/// PR-2: this is the exe.dev slice of what `AgentAdapter` will own.
+pub fn launch_script(backend: &ExeDev, req: &StartRequest) -> String {
+    let otel_block = req
+        .otel_endpoint
+        .as_deref()
+        .map(|e| crate::otel::worker_env(e, &req.session_uid))
+        .unwrap_or_default();
+    let header = [
+        format!("CLAUDE_FLAGS={}", shq(&backend.claude_flags)),
+        format!("TTYD_PORT={}", shq(&backend.ttyd_port.to_string())),
+        format!("OTEL_BLOCK={}", shq(&otel_block)),
+    ]
+    .join("\n");
+    let body = r#"
+set -e
+export PATH="$HOME/.bun/bin:$PATH"
+work="$HOME/work/task"
 {
   echo '#!/usr/bin/env bash'
   echo 'export PATH="$HOME/.bun/bin:$PATH"'
@@ -505,7 +653,7 @@ if command -v ttyd >/dev/null; then
   setsid ttyd -p "$TTYD_PORT" -W tmux -L disponent attach -t worker >/tmp/ttyd.log 2>&1 &
 fi
 "#;
-    format!("{header}\n{body}\n# ── dispatch setup ──\n{setup}\n{launch}")
+    format!("{header}\n{body}")
 }
 
 /// Parse `exe.dev ls --json`, keeping only disponent workers (tagged). A
@@ -545,8 +693,8 @@ pub fn session_of(vm: &Vm) -> Option<&str> {
 mod tests {
     use super::*;
 
-    fn req(repo: Option<&str>, setup: Option<&str>) -> ProvisionRequest {
-        ProvisionRequest {
+    fn req(repo: Option<&str>, setup: Option<&str>) -> StartRequest {
+        StartRequest {
             session_uid: "0198-abc-def0-123456789abc".into(),
             template: Some("claude-base".into()),
             repo: repo.map(String::from),
@@ -564,7 +712,7 @@ mod tests {
         // default: no verdict rather than a faked one.
         let b = ExeDev::dry_run();
         let handle = serde_json::json!({"vmName": "dsp-x", "host": "dsp-x.exe.xyz"});
-        assert_eq!(EnvBackend::delivery_signal(&b, &handle), None);
+        assert_eq!(EnvProvider::delivery_signal(&b, &handle), None);
     }
 
     #[test]
@@ -581,9 +729,8 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_script_orders_clone_setup_agent() {
-        let b = ExeDev::dry_run();
-        let s = bootstrap_script(&b, &req(Some("zmaril/entl"), Some("cargo build")));
+    fn setup_clones_then_runs_dispatch_setup_without_launching() {
+        let s = setup_script(&req(Some("zmaril/entl"), Some("cargo build")));
         let pos = |needle: &str| {
             s.find(needle)
                 .unwrap_or_else(|| panic!("{needle} in script"))
@@ -592,16 +739,32 @@ mod tests {
             pos("gh repo clone") < pos("cargo build"),
             "clone before setup"
         );
-        assert!(
-            pos("cargo build") < pos("tmux -L disponent new-session"),
-            "setup before agent"
-        );
         assert!(s.contains("REPO_SLUG='zmaril/entl'"));
-        assert!(s.contains("cat /tmp/disponent-brief.md"));
+        // START must NOT launch the agent — that's the engine's step.
+        assert!(
+            !s.contains("tmux -L disponent new-session"),
+            "setup must not launch the agent"
+        );
 
         // no repo → no clone, still a work dir
-        let s = bootstrap_script(&b, &req(None, None));
+        let s = setup_script(&req(None, None));
         assert!(s.contains("REPO_SLUG=''"));
+    }
+
+    #[test]
+    fn launch_opens_the_agent_after_setup() {
+        let b = ExeDev::dry_run();
+        let s = launch_script(&b, &req(Some("zmaril/entl"), Some("cargo build")));
+        let pos = |needle: &str| {
+            s.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in script"))
+        };
+        // the launch cats the brief into the run script, then opens the worker
+        assert!(
+            pos("cat /tmp/disponent-brief.md") < pos("tmux -L disponent new-session"),
+            "brief wired before the tmux session"
+        );
+        assert!(s.contains("ttyd"));
     }
 
     #[test]

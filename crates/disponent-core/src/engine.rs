@@ -20,7 +20,7 @@ use fluessig::sql::Dialect;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::backend::{EnvBackend, ExeDev, ProvisionRequest};
+use crate::backend::{EnvProvider, ExeDev, StartRequest};
 use crate::catalog::{self, upsert};
 use crate::local::LocalTmux;
 use crate::mcp_generated::{
@@ -38,7 +38,7 @@ const DEFAULT_PAGE: usize = 100;
 pub struct Engine {
     ledger: Arc<Mutex<Ledger>>,
     /// One backend per environment kind; a kind with no backend queues honestly.
-    backends: Vec<Arc<dyn EnvBackend>>,
+    backends: Vec<Arc<dyn EnvProvider>>,
     /// Terminal observers (one thread per watched session) funneling into the
     /// collector, which folds observations into the ledger.
     observers: Arc<ObserverPool<Observation>>,
@@ -73,6 +73,58 @@ struct DispatchRow {
 
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// #28: the one place a dispatch's lifecycle limits (idle, wall-clock, budget)
+/// are resolved, so #25's timeout/budget detectors consume a single resolution
+/// rather than re-reading limits ad hoc. PR-1 resolves and logs it; enforcement
+/// is future work.
+#[derive(Clone, Debug)]
+struct LifecyclePolicy {
+    /// Max quiet time before a running session is considered stalled.
+    idle_secs: u64,
+    /// Max total wall-clock lifetime.
+    wall_secs: u64,
+    /// Budget ceiling, as the dispatch stated it (opaque money string for now).
+    max_budget: Option<String>,
+}
+
+impl Default for LifecyclePolicy {
+    fn default() -> Self {
+        // Sane defaults for a session with no explicit limits: idle out after 5
+        // minutes of quiet, cap the whole run at an hour.
+        LifecyclePolicy {
+            idle_secs: 300,
+            wall_secs: 3600,
+            max_budget: None,
+        }
+    }
+}
+
+impl LifecyclePolicy {
+    /// Resolve from the immutable dispatch row: `timeout_secs` sets the
+    /// wall-clock ceiling when given; the rest fall back to defaults.
+    fn resolve(timeout_secs: Option<i32>, max_budget: Option<String>) -> Self {
+        let defaults = LifecyclePolicy::default();
+        LifecyclePolicy {
+            wall_secs: timeout_secs
+                .filter(|s| *s > 0)
+                .map(|s| s as u64)
+                .unwrap_or(defaults.wall_secs),
+            max_budget,
+            ..defaults
+        }
+    }
+
+    /// A one-line summary for the session timeline.
+    fn summary(&self) -> String {
+        format!(
+            "lifecycle policy: idle={}s wall={}s budget={}",
+            self.idle_secs,
+            self.wall_secs,
+            self.max_budget.as_deref().unwrap_or("none")
+        )
+    }
 }
 
 impl Default for Engine {
@@ -122,7 +174,7 @@ impl Engine {
     /// sessions get their terminal observers back.
     pub fn open_with(
         sink: Option<&str>,
-        backends: Vec<Arc<dyn EnvBackend>>,
+        backends: Vec<Arc<dyn EnvProvider>>,
     ) -> anyhow::Result<Self> {
         let mut sink = Sink::open(sink)?;
         sink.apply(&catalog::seed_tx())?;
@@ -170,14 +222,16 @@ impl Engine {
         };
         for (uid, handle, kind) in watchable {
             if let Some(backend) = kind.and_then(|k| engine.backend_for(&k)) {
-                engine.watch(&uid, backend, handle);
+                // Rehydrated watchers don't carry the dispatch's limits forward;
+                // policy is logged/stored only in PR-1, so a default is honest.
+                engine.watch(&uid, backend, handle, LifecyclePolicy::default());
             }
         }
         Ok(engine)
     }
 
     /// Memory-only over one injected backend (the dry-run tests' front door).
-    pub fn with_backend<B: EnvBackend + 'static>(backend: B) -> Self {
+    pub fn with_backend<B: EnvProvider + 'static>(backend: B) -> Self {
         Engine::assemble(
             Ledger {
                 environments: catalog::environments(),
@@ -189,7 +243,7 @@ impl Engine {
 
     /// The common tail of every constructor: the observer pool and the
     /// collector thread that folds its drain into the ledger.
-    fn assemble(ledger: Ledger, backends: Vec<Arc<dyn EnvBackend>>) -> Self {
+    fn assemble(ledger: Ledger, backends: Vec<Arc<dyn EnvProvider>>) -> Self {
         let ledger = Arc::new(Mutex::new(ledger));
         let observers = Arc::new(ObserverPool::new(1024));
         let collector_stop = Arc::new(AtomicBool::new(false));
@@ -244,11 +298,24 @@ impl Engine {
 
     /// Watch a running session's terminal: capture on an interval, emit what
     /// changed as scraped raw events. Idempotent per session (pool-enforced).
-    fn watch(&self, uid: &str, backend: Arc<dyn EnvBackend>, handle: serde_json::Value) {
-        watch_session(&self.observers, self.observe_interval, backend, uid, handle);
+    fn watch(
+        &self,
+        uid: &str,
+        backend: Arc<dyn EnvProvider>,
+        handle: serde_json::Value,
+        policy: LifecyclePolicy,
+    ) {
+        watch_session(
+            &self.observers,
+            self.observe_interval,
+            backend,
+            uid,
+            handle,
+            policy,
+        );
     }
 
-    fn backend_for(&self, kind: &str) -> Option<Arc<dyn EnvBackend>> {
+    fn backend_for(&self, kind: &str) -> Option<Arc<dyn EnvProvider>> {
         self.backends.iter().find(|b| b.kind() == kind).cloned()
     }
 }
@@ -265,13 +332,19 @@ impl Drop for Engine {
 fn watch_session(
     observers: &ObserverPool<Observation>,
     interval: Duration,
-    backend: Arc<dyn EnvBackend>,
+    backend: Arc<dyn EnvProvider>,
     uid: &str,
     handle: serde_json::Value,
+    // #28: carried so #25's stall/timeout detectors can consume it here later;
+    // PR-1 only resolves + threads it (no enforcement yet).
+    _policy: LifecyclePolicy,
 ) {
     let mut last = String::new();
     observers.spawn(uid.to_string(), interval, move || {
-        let pane = backend.capture(&handle).map_err(|e| e.to_string())?;
+        let pane = backend
+            .compute(&handle)
+            .and_then(|c| c.capture())
+            .map_err(|e| e.to_string())?;
         let delta = observe::terminal_delta(&last, &pane);
         last = pane;
         Ok(Poll::Items(
@@ -530,10 +603,11 @@ impl Ledger {
 /// mid-provision, in which case the fresh worker is torn down, not adopted.
 fn provision_worker(
     ledger: Arc<Mutex<Ledger>>,
-    backend: Arc<dyn EnvBackend>,
-    req: ProvisionRequest,
+    backend: Arc<dyn EnvProvider>,
+    req: StartRequest,
     observers: Arc<ObserverPool<Observation>>,
     observe_interval: Duration,
+    policy: LifecyclePolicy,
 ) {
     let uid = req.session_uid.clone();
     {
@@ -551,15 +625,28 @@ fn provision_worker(
         }
     }
 
-    match backend.provision(&req) {
+    // START stands the worker up, then the engine launches the agent as an
+    // explicit step on the fresh shell (the Compute surface). A failure at any
+    // stage becomes the session's setup error.
+    // PR-2: AgentAdapter will own install/auth/start/prompt/monitor/output/
+    // stopWork/stopExec — this inline launch is that seam's PR-1 stand-in.
+    let started = (|| -> anyhow::Result<crate::backend::Provision> {
+        let p = backend.start(&req)?;
+        if let Some(cmd) = backend.agent_launch_cmd(&req) {
+            backend.compute(&p.handle)?.spawn(&cmd)?;
+        }
+        Ok(p)
+    })();
+
+    match started {
         Ok(p) => {
             let mut l = ledger.lock().unwrap();
             let Ok(session) = l.session_mut(&uid) else {
-                let _ = backend.teardown(&p.handle);
+                let _ = backend.reap(&p.handle);
                 return;
             };
             if session.state != "provisioning" {
-                let _ = backend.teardown(&p.handle);
+                let _ = backend.reap(&p.handle);
                 return;
             }
             // Route the flip through the guard so it can't skip the state
@@ -567,7 +654,7 @@ fn provision_worker(
             let state_ev = match l.transition(&uid, "running") {
                 Ok((_, e)) => e,
                 Err(_) => {
-                    let _ = backend.teardown(&p.handle);
+                    let _ = backend.reap(&p.handle);
                     return;
                 }
             };
@@ -576,12 +663,16 @@ fn provision_worker(
             session.env_handle = Some(p.handle.clone());
             session.url = p.url.clone();
             let snapshot = session.clone();
+            // The worker-up log also carries the resolved lifecycle policy (#28):
+            // one place the limits were decided, folded into an existing event so
+            // the timeline shape is unchanged.
             let log_ev = l.push_event(
                 &uid,
                 "log",
                 json!({"kind": "log", "payload":
-                    {"line": format!("worker up: {}{}", p.handle,
-                        p.url.as_deref().map(|u| format!(" ({u})")).unwrap_or_default())}}),
+                    {"line": format!("worker up: {}{} [{}]", p.handle,
+                        p.url.as_deref().map(|u| format!(" ({u})")).unwrap_or_default(),
+                        policy.summary())}}),
             );
             let _ = l.mirror(vec![
                 session_mutation(&snapshot),
@@ -589,7 +680,16 @@ fn provision_worker(
                 event_mutation(&log_ev),
             ]);
             drop(l);
-            watch_session(&observers, observe_interval, backend, &uid, p.handle);
+            // #28: the resolved policy is also carried into the watcher (the
+            // single resolution site) so #25's detectors can consume it later.
+            watch_session(
+                &observers,
+                observe_interval,
+                backend,
+                &uid,
+                p.handle,
+                policy,
+            );
         }
         Err(e) => {
             let mut l = ledger.lock().unwrap();
@@ -742,7 +842,7 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             "log",
             json!({"kind": "log", "payload": {"line": accepted}}),
         );
-        let provision = backend.is_some().then(|| ProvisionRequest {
+        let provision = backend.is_some().then(|| StartRequest {
             session_uid: session.uid.clone(),
             template: dispatch.spec.template.clone(),
             repo: dispatch.spec.repo.clone(),
@@ -752,6 +852,11 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             brief: dispatch.spec.brief.clone(),
             otel_endpoint: self.otel_endpoint_for(&env_kind),
         });
+        // #28: resolve the lifecycle limits ONCE, here, off the immutable
+        // dispatch row — the single site later stall/timeout/budget detectors
+        // read rather than re-deriving limits ad hoc.
+        let policy =
+            LifecyclePolicy::resolve(dispatch.spec.timeout_secs, dispatch.spec.max_budget.clone());
         let mutations = vec![
             dispatch.mutation(),
             session_mutation(&session),
@@ -766,7 +871,9 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             let ledger = Arc::clone(&self.ledger);
             let observers = Arc::clone(&self.observers);
             let interval = self.observe_interval;
-            std::thread::spawn(move || provision_worker(ledger, backend, req, observers, interval));
+            std::thread::spawn(move || {
+                provision_worker(ledger, backend, req, observers, interval, policy)
+            });
         }
         Ok(session)
     }
@@ -802,7 +909,8 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                 "no live backend for environment kind '{kind}'"
             )));
         };
-        match backend.workspace_link(&handle) {
+        let link = backend.compute(&handle).and_then(|c| c.workspace_link());
+        match link {
             Ok(Some(url)) => Ok(WorkspaceLink {
                 session_uid,
                 available: true,
@@ -896,7 +1004,7 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             bail!("session {session_uid} has no reachable worker");
         };
         // The env round-trip happens outside the ledger lock; the event records after.
-        backend.send(&handle, &input)?;
+        backend.compute(&handle)?.send(&input)?;
         let mut ledger = self.ledger.lock().unwrap();
         let event = ledger.push_event(
             &session_uid,
@@ -915,10 +1023,16 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         if TERMINAL.contains(&state.as_str()) {
             bail!("session {session_uid} is already {state}");
         }
-        // Stop the agent but keep the environment for inspection — reap deletes it.
+        // Stop the agent but keep the environment for inspection — reap deletes
+        // it. Graceful-then-hard: interrupt the running work (stop_work), then
+        // kill the process (stop_exec); the env stays either way.
         let backend = kind.and_then(|k| self.backend_for(&k));
         if let (Some(backend), Some(handle)) = (backend, session.env_handle.clone()) {
-            if let Err(e) = backend.stop(&handle) {
+            let stop = backend.compute(&handle).and_then(|c| {
+                c.stop_work()?;
+                c.stop_exec()
+            });
+            if let Err(e) = stop {
                 let ev = ledger.push_event(
                     &session_uid,
                     "log",
@@ -949,24 +1063,32 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         }
         let backend = kind.and_then(|k| self.backend_for(&k));
         let handle = session.env_handle.clone();
+        let live = !TERMINAL.contains(&session.state.as_str());
 
-        // Delivery assessment: while the env is still LIVE (before teardown
-        // destroys the work dir), ask the backend whether the session shipped a
-        // diff. A coarse backend that can't diff returns None → nothing recorded
-        // (honest by omission). We only READ here; recording is deferred until
-        // after teardown succeeds, so a failed-then-retried reap can't
-        // double-emit. Detect-and-report only — no state change hangs off this.
+        // Delivery assessment: while the env is still LIVE (before REAP destroys
+        // the work dir), ask the backend whether the session shipped a diff. A
+        // coarse backend that can't diff returns None → nothing recorded (honest
+        // by omission). We only READ here; recording is deferred until after REAP
+        // succeeds, so a failed-then-retried reap can't double-emit.
+        // Detect-and-report only — no state change hangs off this.
         let delivery = match (backend.as_ref(), handle.as_ref()) {
             (Some(b), Some(h)) => b.delivery_signal(h),
             _ => None,
         };
 
-        // Reap = resources torn down THEN the row archived — a teardown failure
-        // errors out with the board unchanged, so reap can be retried.
+        // Reap = the agent killed (if still live) THEN resources destroyed THEN
+        // the row archived — a REAP failure errors out with the board unchanged,
+        // so reap can be retried. A terminal session already had its process
+        // stopped (cancel/lost), so skip stop_exec there.
         if let (Some(backend), Some(handle)) = (backend.as_ref(), handle.as_ref()) {
+            if live {
+                if let Ok(compute) = backend.compute(handle) {
+                    let _ = compute.stop_exec();
+                }
+            }
             backend
-                .teardown(handle)
-                .map_err(|e| anyhow!("teardown {handle}: {e} (reap again to retry)"))?;
+                .reap(handle)
+                .map_err(|e| anyhow!("reap {handle}: {e} (reap again to retry)"))?;
         }
 
         let mut mutations = Vec::new();
@@ -1073,7 +1195,7 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             if row.reaped {
                 if exists {
                     let backend = self.backend_for(row.kind.as_deref().unwrap()).unwrap();
-                    if backend.teardown(handle).is_ok() {
+                    if backend.reap(handle).is_ok() {
                         report.torn_down += 1;
                     }
                 }
@@ -1137,12 +1259,15 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                 ledger.dispatches.push(dispatch);
                 ledger.sessions.push(session);
                 if let Some(backend) = self.backend_for(kind) {
+                    // An adopted worker carries no dispatch limits we can trust;
+                    // policy is logged/stored only in PR-1, so a default is honest.
                     watch_session(
                         &self.observers,
                         self.observe_interval,
                         backend,
                         session_uid,
                         handle.clone(),
+                        LifecyclePolicy::default(),
                     );
                 }
                 report.adopted += 1;
@@ -1253,185 +1378,4 @@ impl Default for DriverPlanOptions {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mcp_generated::DisponentMcp;
-
-    fn spec(env: &str) -> DispatchSpec {
-        serde_json::from_value(json!({"brief": "do the thing", "env": env})).unwrap()
-    }
-
-    #[test]
-    fn dispatch_resolves_defaults_and_queues() {
-        let engine = Engine::new();
-        let session = engine.dispatch(spec("exe-dev")).unwrap();
-        assert_eq!(session.state, "queued");
-        assert!(session.reaped_at.is_none());
-        let fetched = engine.session(session.uid.clone()).unwrap().unwrap();
-        assert_eq!(fetched.dispatch_id, session.dispatch_id);
-    }
-
-    #[test]
-    fn dispatch_rejects_unknown_env_and_uncatalogued_combos() {
-        let engine = Engine::new();
-        assert!(engine.dispatch(spec("nonesuch")).is_err());
-
-        let mut bad = spec("local");
-        bad.agent = Some("codex".into());
-        assert!(engine.dispatch(bad.clone()).is_err());
-        bad.unchecked = Some(true);
-        assert_eq!(engine.dispatch(bad).unwrap().state, "queued");
-    }
-
-    #[test]
-    fn cancel_then_reap_walks_the_lifecycle() {
-        let engine = Engine::new();
-        let s = engine.dispatch(spec("local")).unwrap();
-        let cancelled = engine.cancel(s.uid.clone()).unwrap();
-        assert_eq!(cancelled.state, "cancelled");
-        assert!(cancelled.ended_at.is_some());
-        assert!(engine.cancel(s.uid.clone()).is_err(), "already terminal");
-        let reaped = engine.reap(s.uid.clone()).unwrap();
-        assert!(reaped.reaped_at.is_some());
-        assert!(engine.reap(s.uid).is_err(), "already reaped");
-    }
-
-    #[test]
-    fn reap_on_a_live_session_cancels_first() {
-        let engine = Engine::new();
-        let s = engine.dispatch(spec("local")).unwrap();
-        let reaped = engine.reap(s.uid).unwrap();
-        assert_eq!(reaped.state, "cancelled");
-        assert!(reaped.reaped_at.is_some());
-    }
-
-    #[test]
-    fn the_ledger_guards_the_state_machine() {
-        let engine = Engine::new();
-        // exe-dev has no backend here, so the session parks at queued and we can
-        // drive the ledger through transitions by hand without racing provisioning.
-        let uid = engine.dispatch(spec("exe-dev")).unwrap().uid;
-        let uid2 = engine.dispatch(spec("exe-dev")).unwrap().uid;
-        let mut ledger = engine.ledger.lock().unwrap();
-
-        // A legal walk all the way to a terminal state succeeds.
-        ledger.transition(&uid, "provisioning").unwrap();
-        ledger.transition(&uid, "running").unwrap();
-        ledger.transition(&uid, "needs_input").unwrap();
-        ledger.transition(&uid, "running").unwrap();
-        let (done, _) = ledger.transition(&uid, "completed").unwrap();
-        assert_eq!(done.state, "completed");
-        assert!(done.ended_at.is_some());
-
-        // A terminal state has no way forward — reviving it is rejected.
-        let err = ledger.transition(&uid, "running").unwrap_err();
-        assert!(
-            err.to_string().contains("illegal transition"),
-            "expected an illegal-transition error, got: {err}"
-        );
-
-        // And a fresh session can't skip states (queued straight to running).
-        assert!(ledger.transition(&uid2, "running").is_err());
-        // queued -> cancelled is a legal live-state exit, though.
-        let (cancelled, _) = ledger.transition(&uid2, "cancelled").unwrap();
-        assert_eq!(cancelled.state, "cancelled");
-        assert!(ledger.transition(&uid2, "running").is_err());
-    }
-
-    #[test]
-    fn events_filter_and_cursor_page() {
-        let engine = Engine::new();
-        let a = engine.dispatch(spec("local")).unwrap();
-        let b = engine.dispatch(spec("exe-dev")).unwrap();
-        engine.cancel(b.uid.clone()).unwrap();
-
-        // b has a log + a state event; a has just the log
-        let only_b: EventOptions = serde_json::from_value(json!({"sessionUid": b.uid})).unwrap();
-        let events = engine.events(Some(only_b.clone()), None, None).unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].kind, "state");
-        assert_eq!(events[1].idx, 1, "the DTO carries its timeline position");
-        assert_eq!(events[1].payload["payload"]["to"], "cancelled");
-
-        // cursor: after=1 means "I've seen one", so only the state event remains
-        let page = engine.events(Some(only_b), Some(1), Some(10)).unwrap();
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0].kind, "state");
-
-        let a_events = engine
-            .events(
-                Some(serde_json::from_value(json!({"sessionUid": a.uid})).unwrap()),
-                None,
-                None,
-            )
-            .unwrap();
-        assert_eq!(a_events.len(), 1);
-        assert_eq!(a_events[0].kind, "log");
-    }
-
-    #[test]
-    fn sessions_filter_by_env_and_state() {
-        let engine = Engine::new();
-        engine.dispatch(spec("local")).unwrap();
-        let b = engine.dispatch(spec("exe-dev")).unwrap();
-        engine.cancel(b.uid).unwrap();
-
-        let by_env = |env: &str| -> Vec<Session> {
-            engine
-                .sessions(Some(serde_json::from_value(json!({"env": env})).unwrap()))
-                .unwrap()
-        };
-        assert_eq!(by_env("local").len(), 1);
-        assert_eq!(by_env("exe-dev").len(), 1);
-        assert_eq!(by_env("exe-dev")[0].state, "cancelled");
-
-        let queued = engine
-            .sessions(Some(
-                serde_json::from_value(json!({"state": "queued"})).unwrap(),
-            ))
-            .unwrap();
-        assert_eq!(queued.len(), 1);
-    }
-
-    #[test]
-    fn driver_plan_emits_ddl_then_ordered_rows_and_pages() {
-        let engine = Engine::new();
-        let s = engine.dispatch(spec("local")).unwrap();
-        engine.cancel(s.uid).unwrap();
-
-        let all = engine.driver_plan(None, None, Some(1000)).unwrap();
-        let creates = all
-            .iter()
-            .filter(|s| s.sql.starts_with("CREATE TABLE"))
-            .count();
-        assert_eq!(creates, SQLITE_TABLES.len(), "DDL for every table");
-        // rows follow dependency order: the dispatch's upsert before the session's
-        let pos = |needle: &str| all.iter().position(|s| s.sql.contains(needle)).unwrap();
-        assert!(pos("INSERT INTO \"dispatches\"") < pos("INSERT INTO \"sessions\""));
-        assert!(pos("INSERT INTO \"sessions\"") < pos("INSERT INTO \"events\""));
-
-        // the cursor pages the same sequence
-        let (a, b) = (
-            engine.driver_plan(None, None, Some(5)).unwrap(),
-            engine.driver_plan(None, Some(5), Some(1000)).unwrap(),
-        );
-        assert_eq!(a.len(), 5);
-        assert_eq!(a.last().unwrap().sql, all[4].sql);
-        assert_eq!(b.first().unwrap().sql, all[5].sql);
-        assert_eq!(a.len() + b.len(), all.len());
-
-        // postgres flavor speaks $n placeholders
-        let pg_opts: DriverPlanOptions =
-            serde_json::from_value(json!({"dialect": "postgres"})).unwrap();
-        let pg = engine.driver_plan(Some(pg_opts), None, Some(1000)).unwrap();
-        assert!(pg.iter().any(|s| s.sql.contains("$1")));
-
-        assert!(engine
-            .driver_plan(
-                Some(serde_json::from_value(json!({"dialect": "mongodb"})).unwrap()),
-                None,
-                None,
-            )
-            .is_err());
-    }
-}
+mod tests;
