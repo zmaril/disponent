@@ -11,7 +11,6 @@ import json
 
 import conftest  # noqa: F401  (imports for its env-var side effects)
 import pytest
-
 from disponent import CapabilityKind, Disponent, EnvKind, EventKind, Party, SessionState
 
 

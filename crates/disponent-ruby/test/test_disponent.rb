@@ -36,7 +36,7 @@ class TestDisponent < Minitest::Test
     # scalar optionals agent..unchecked), carried here so the fan-out send below
     # can address it.
     session = d.dispatch("say hi from ruby", "local",
-                         nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, ["ruby-fanout"])
+      nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, ["ruby-fanout"])
     assert_equal "queued", session.state
 
     # Ruby omits the @manual wait(); poll session() until the dry-run
