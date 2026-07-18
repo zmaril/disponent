@@ -1,0 +1,11 @@
+[package]
+name = "disponent-hold"
+description = "The disponent headless pty session holder: open a pty, exec an agent, stream byte-exact output over a framed unix socket."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+libc = { workspace = true }

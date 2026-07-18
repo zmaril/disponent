@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/disponent-core",
     "crates/disponent-cli",
+    "crates/disponent-hold",
     "crates/disponent-node",
     "crates/disponent-python",
     "crates/disponent-ruby",
@@ -10,7 +11,13 @@ members = [
 # disponent-node (napi), disponent-python (PyO3/maturin), and disponent-ruby
 # (Magnus/rb_sys) build via their own toolchains, not plain `cargo build` — keep
 # them out of the default set so core/CLI builds stay fast (the entl move).
-default-members = ["crates/disponent-core", "crates/disponent-cli"]
+# disponent-hold is plain sync Rust on the CLI side, so it stays IN the default
+# set (like disponent-cli) — one static artifact ships to a VM.
+default-members = [
+    "crates/disponent-core",
+    "crates/disponent-cli",
+    "crates/disponent-hold",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,3 +32,4 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid = { version = "1", features = ["v7"] }
 tiny_http = "0.12"
+libc = "0.2"

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 disponent-core = { path = "../disponent-core" }
+disponent-hold = { path = "../disponent-hold" }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }
