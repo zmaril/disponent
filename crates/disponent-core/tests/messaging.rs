@@ -206,13 +206,100 @@ fn ack_stamps_a_message_and_shows_fanout_progress() {
 }
 
 #[test]
-fn send_with_no_target_is_an_honest_capability_edge() {
+fn manager_send_needs_a_target() {
     let engine = Engine::new();
-    // The core send is the Manager surface; worker self-send (recipient forced
-    // to the Manager) isn't wired yet — a targetless send says so, never fakes.
+    // The Manager surface `send` requires a destination; a worker's targetless
+    // self-send goes through the separate worker_send path (below), never here.
     let err = engine.send("hi".into(), None, None, None).unwrap_err();
     assert!(
-        err.to_string().contains("worker self-send isn't wired yet"),
+        err.to_string().contains("send needs a target"),
         "unexpected: {err}"
     );
+}
+
+#[test]
+fn worker_send_is_forced_to_the_manager() {
+    let engine = Engine::new();
+    let wk = engine.dispatch(tagged_spec(&["x"])).unwrap();
+
+    // A worker names no recipient: worker_send fills sender = the bound worker,
+    // recipient = the Manager, anchored to the worker's own timeline.
+    let minted = engine
+        .worker_send(
+            &wk.uid,
+            "the migration will drop data; proceed?".into(),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(minted.len(), 1, "a worker self-send is a fan-out of one");
+    assert_eq!(minted[0].sender, "worker");
+    assert_eq!(minted[0].recipient, "manager");
+    assert_eq!(minted[0].session_uid, wk.uid, "rides its own timeline");
+
+    // it projects an exact mail event on the worker's own timeline
+    let opts = serde_json::from_value(serde_json::json!({ "sessionUid": wk.uid })).unwrap();
+    let mail = engine
+        .events(Some(opts), None, None)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "mail")
+        .expect("a mail event");
+    assert_eq!(mail.fidelity, "exact");
+    assert_eq!(mail.payload["payload"]["sender"], "worker");
+
+    // the Manager reads worker→Manager mail across the fleet
+    let inbox: MessagesFilter =
+        serde_json::from_value(serde_json::json!({ "recipient": "manager" })).unwrap();
+    assert_eq!(engine.messages(Some(inbox)).unwrap().len(), 1);
+}
+
+#[test]
+fn worker_ack_is_confined_to_its_own_inbox() {
+    let engine = Engine::new();
+    let mine = engine.dispatch(tagged_spec(&["x"])).unwrap();
+    let sibling = engine.dispatch(tagged_spec(&["x"])).unwrap();
+
+    // The Manager drops a directive into each worker's inbox.
+    let to_mine = engine
+        .send(
+            "for you".into(),
+            Some(to(serde_json::json!({ "sessions": [mine.uid] }))),
+            None,
+            None,
+        )
+        .unwrap();
+    let to_sibling = engine
+        .send(
+            "for the sibling".into(),
+            Some(to(serde_json::json!({ "sessions": [sibling.uid] }))),
+            None,
+            None,
+        )
+        .unwrap();
+
+    // A worker acks a message in its OWN inbox.
+    engine.worker_ack(&mine.uid, to_mine[0].id.clone()).unwrap();
+    let mine_msg = &engine
+        .messages(Some(
+            serde_json::from_value(serde_json::json!({ "sessionUid": mine.uid })).unwrap(),
+        ))
+        .unwrap()[0];
+    assert!(mine_msg.acked_at.is_some());
+
+    // It may NOT ack a sibling's message — not its inbox.
+    let err = engine
+        .worker_ack(&mine.uid, to_sibling[0].id.clone())
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("not in this worker's inbox"),
+        "unexpected: {err}"
+    );
+    // the sibling's message stays unacked
+    let sib_msg = &engine
+        .messages(Some(
+            serde_json::from_value(serde_json::json!({ "sessionUid": sibling.uid })).unwrap(),
+        ))
+        .unwrap()[0];
+    assert!(sib_msg.acked_at.is_none());
 }

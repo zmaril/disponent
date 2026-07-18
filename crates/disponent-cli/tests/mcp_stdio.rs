@@ -16,8 +16,16 @@ struct Server {
 
 impl Server {
     fn start(role: &str) -> Server {
+        Server::start_args(&["--role", role, "--sink", "none"])
+    }
+
+    /// Spawn `disponent mcp` with an explicit arg list after the subcommand —
+    /// lets a test pick the sink and (for a worker) the `--bound-session`.
+    fn start_args(args: &[&str]) -> Server {
+        let mut full = vec!["mcp"];
+        full.extend_from_slice(args);
         let mut child = Command::new(env!("CARGO_BIN_EXE_disponent"))
-            .args(["mcp", "--role", role, "--sink", "none"])
+            .args(&full)
             .env("DISPONENT_EXE_DRY_RUN", "1")
             .env("DISPONENT_LOCAL_DRY_RUN", "1")
             .stdin(Stdio::piped())
@@ -243,10 +251,12 @@ fn supervisor_walks_the_whole_flow() {
 }
 
 #[test]
-fn worker_sees_only_the_readonly_surface() {
+fn worker_surface_is_readonly_plus_send_ack_and_nothing_that_recurses() {
     let mut server = Server::start("worker");
 
     let names = server.tool_names();
+    // The worker surface is EXACTLY the read-only observe tools plus the two
+    // self-scoped writes (send up to its Manager, ack on its own inbox).
     assert_eq!(
         names,
         [
@@ -257,14 +267,32 @@ fn worker_sees_only_the_readonly_surface() {
             "disponent_sessions",
             "disponent_workspace_link",
             "disponent_events",
+            "disponent_send",
+            "disponent_ack",
             "disponent_messages",
             "disponent_driver_plan",
         ],
-        "observe-only: exactly the readonly tools (send/ack stay hidden until the \
-         worker surface is widened)"
+        "observe-only + the two self-scoped writes"
     );
 
-    // calling a hidden tool is a protocol-level rejection, not a silent no-op
+    // The no-recursion invariant, stated as tool ABSENCE: nothing that
+    // dispatches, spawns, tears down, or otherwise drives another session is on
+    // the worker surface. This is the load-bearing guarantee (§9).
+    for forbidden in [
+        "disponent_dispatch", // spawn
+        "disponent_cancel",   // drive another session
+        "disponent_reap",     // tear down
+        "disponent_resume",   // drive another session
+        "disponent_refresh",
+        "disponent_reconcile",
+    ] {
+        assert!(
+            !names.contains(&forbidden.to_string()),
+            "worker must not see {forbidden}"
+        );
+    }
+
+    // and calling a hidden tool is a protocol-level rejection, not a silent no-op
     server.next_id += 1;
     let msg = json!({"jsonrpc": "2.0", "id": server.next_id, "method": "tools/call",
         "params": {"name": "disponent_dispatch",
@@ -274,4 +302,54 @@ fn worker_sees_only_the_readonly_surface() {
     server.stdout.read_line(&mut line).unwrap();
     let reply: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(reply["error"]["code"], json!(-32602), "{reply}");
+}
+
+#[test]
+fn worker_send_only_reaches_its_manager_never_a_sibling() {
+    // A worker's stdio server has its own engine, so seed a session through a
+    // shared sink: a supervisor dispatches it, then a worker binds to it (the
+    // env wires a worker endpoint against a real session the same way).
+    let dir = std::env::temp_dir().join(format!("disp-mcp-worker-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let sink = dir.join("ledger.sqlite3");
+    let sink = sink.to_str().unwrap();
+    let _ = std::fs::remove_file(sink);
+
+    let uid = {
+        let mut sup = Server::start_args(&["--role", "supervisor", "--sink", sink]);
+        let (session, err) = sup.call(
+            "disponent_dispatch",
+            json!({"spec": {"brief": "worker to bind", "env": "local"}}),
+        );
+        assert!(!err, "{session}");
+        session["uid"].as_str().unwrap().to_string()
+    }; // supervisor drops (its writes are in the sink)
+
+    let mut wk = Server::start_args(&["--role", "worker", "--sink", sink, "--bound-session", &uid]);
+
+    // A bare send (no recipient) is minted sender=worker, recipient=manager,
+    // anchored to the bound session — its only reachable destination.
+    let (minted, err) = wk.call(
+        "disponent_send",
+        json!({"body": "proceed with the migration?"}),
+    );
+    assert!(!err, "worker send should succeed: {minted}");
+    assert_eq!(minted[0]["sender"], "worker");
+    assert_eq!(minted[0]["recipient"], "manager");
+    assert_eq!(minted[0]["sessionUid"], uid, "rides its own timeline");
+
+    // A worker that tries to NAME a recipient (address a sibling / the user) is
+    // rejected — it has no recipient to give.
+    let (rej, err) = wk.call(
+        "disponent_send",
+        json!({"body": "hey sibling", "to": {"sessions": ["some-other-uid"]}}),
+    );
+    assert!(err, "naming a recipient must fail: {rej}");
+    assert!(
+        rej.as_str().unwrap().contains("takes no recipient"),
+        "unexpected: {rej}"
+    );
+
+    let _ = std::fs::remove_file(sink);
+    let _ = std::fs::remove_dir_all(&dir);
 }

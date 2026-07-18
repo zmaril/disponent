@@ -373,6 +373,25 @@ impl Engine {
             ledger.agent_of(uid).and_then(|a| self.adapter_for(&a)),
         )
     }
+
+    /// Worker-role `send` (notes/manager-worker-comms.md §9): recipient forced
+    /// to the Manager, sender = the bound worker session, anchored to that
+    /// session. The worker-role MCP server calls this instead of the Manager
+    /// `send` so a worker never names a recipient (no addressing a sibling).
+    pub fn worker_send(
+        &self,
+        bound_session: &str,
+        body: String,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> anyhow::Result<Vec<Message>> {
+        messaging::worker_send(self, bound_session, body, in_reply_to, topic)
+    }
+
+    /// Worker-role `ack` (§9): only a message in the bound session's own inbox.
+    pub fn worker_ack(&self, bound_session: &str, message_id: String) -> anyhow::Result<()> {
+        messaging::worker_ack(self, bound_session, message_id)
+    }
 }
 
 impl Drop for Engine {
