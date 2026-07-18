@@ -71,7 +71,12 @@ jobs:
           # The schema tool lives in its own repo; pin the SHA disponent
           # generates against (KEEP IN LOCKSTEP with the fluessig `rev` in
           # crates/disponent-core/Cargo.toml — one tool, one version).
-          FLUESSIG_REF: 5c65e8f70245fa1940ac9071cfc12916e149a9d3
+          #
+          # This points at the tip of fluessig #36 (pins @typespec/compiler to
+          # exact 1.14.0 so the emitter's catalog/api stamp stops drifting).
+          # TODO: once fluessig #36 merges, repoint this to the fluessig `main`
+          # SHA — if #36 squash-merges, be07ecf won't exist on main.
+          FLUESSIG_REF: be07ecf0c490ff6ecb61c6d374aff7bb679f55fc
         run: |
           # Clone into RUNNER_TEMP (outside the workspace) so it can't register
           # as drift in the git-clean check below. Fetch the pinned SHA directly
