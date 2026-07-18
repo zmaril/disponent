@@ -82,13 +82,12 @@ fn round_trip_input_output_and_exit_code() {
 /// Drive one client through the full input/output round-trip and return the
 /// child's exit as observed on the stream.
 ///
-/// The holder does **not** guarantee the last `Data` chunk is flushed before
-/// the `Exit` frame: the reader thread (pty → `Data`) and the watcher thread
-/// (`waitpid` → `Exit`) race to enqueue onto each client's queue, and the child
-/// runs `echo "got:$x"; exit 3` back-to-back. So rather than assume `got:world`
-/// strictly precedes the exit (the old `read_until` did, and bailed on the
-/// `Exit` frame under load), drain frames accumulating `Data` and capturing the
-/// `Exit`, and stop only once BOTH have been seen — tolerating either order.
+/// The holder now guarantees the child's final `Data` is flushed to each client
+/// *before* the `Exit` frame: the reader drains the pty to EOF and only then
+/// emits `Exit` (the watcher merely records the reaped status). So even though
+/// the child runs `echo "got:$x"; exit 3` back-to-back, `got:world` must already
+/// be in hand the moment `Exit` arrives — assert exactly that, and that nothing
+/// follows the `Exit`.
 fn client_round_trip(dir: &Path) -> anyhow::Result<Exit> {
     // This client sends input, so it must hold the writer lock (M2a).
     let mut c = Client::connect_uid_as(Some(dir), "rt", Role::Writer)?;
@@ -107,21 +106,34 @@ fn client_round_trip(dir: &Path) -> anyhow::Result<Exit> {
     let mut acc = Vec::new();
     let mut exit = None;
     loop {
-        match c.read_frame()? {
-            Some(ServerFrame::Data(d)) => acc.extend_from_slice(&d),
-            Some(ServerFrame::Heartbeat) => {}
-            Some(ServerFrame::Exit(e)) => exit = Some(e),
-            None => break,
-        }
-        if contains(&acc, b"got:world") && exit.is_some() {
-            break;
+        match c.read_frame() {
+            Ok(Some(ServerFrame::Data(d))) => {
+                // Any Data after the Exit frame would break the ordering guarantee.
+                anyhow::ensure!(
+                    exit.is_none(),
+                    "a Data frame arrived AFTER Exit — ordering guarantee violated"
+                );
+                acc.extend_from_slice(&d);
+            }
+            Ok(Some(ServerFrame::Heartbeat)) => {}
+            Ok(Some(ServerFrame::Exit(e))) => {
+                // The final output must already be in hand when Exit arrives.
+                anyhow::ensure!(
+                    contains(&acc, b"got:world"),
+                    "Exit arrived before the child's final output — got {:?}",
+                    String::from_utf8_lossy(&acc)
+                );
+                exit = Some(e);
+                // Give any (erroneous) straggler Data a chance to surface.
+                c.set_read_timeout(Some(Duration::from_millis(300)))?;
+            }
+            Ok(None) => break,
+            // Post-Exit read timeout: we've waited long enough to be sure no
+            // straggler Data follows. Before Exit, a read error is a real fault.
+            Err(_) if exit.is_some() => break,
+            Err(e) => return Err(e),
         }
     }
-    anyhow::ensure!(
-        contains(&acc, b"got:world"),
-        "expected the echoed input, got {:?}",
-        String::from_utf8_lossy(&acc)
-    );
     exit.ok_or_else(|| anyhow::anyhow!("stream closed before an Exit frame"))
 }
 
@@ -374,5 +386,147 @@ fn a_reader_still_gets_live_data_while_a_writer_drives() {
         String::from_utf8_lossy(&seen).contains("shared-line-xyz"),
         "a reader must keep receiving live Data alongside a writer"
     );
+    drop(holder);
+}
+
+// ---------------------------------------------------------------------------
+// Ordering guarantee: the child's final `Data` must always reach a client
+// before the `Exit` frame. The reader drains the pty to EOF and only then
+// emits `Exit` (the watcher merely records the reaped status), so `Exit` is
+// strictly the last frame per client. The previous reader/watcher race
+// reproduced at ~20%; these tests must be clean across many iterations.
+// ---------------------------------------------------------------------------
+
+/// Collect every frame from a fresh client until the stream is spent. Returns
+/// the accumulated `Data` bytes, whether any `Data` arrived *after* `Exit`
+/// (an ordering violation), and the observed exit. A blocking read is used up
+/// to `Exit`; a short timeout afterwards lets any erroneous straggler surface.
+fn collect_frames(dir: &Path, uid: &str) -> (Vec<u8>, bool, Option<Exit>) {
+    let mut c = Client::connect_uid(Some(dir), uid).unwrap();
+    let mut acc = Vec::new();
+    let mut exit = None;
+    let mut data_after_exit = false;
+    loop {
+        match c.read_frame() {
+            Ok(Some(ServerFrame::Data(d))) => {
+                if exit.is_some() {
+                    data_after_exit = true;
+                }
+                acc.extend_from_slice(&d);
+            }
+            Ok(Some(ServerFrame::Heartbeat)) => {}
+            Ok(Some(ServerFrame::Exit(e))) => {
+                exit = Some(e);
+                c.set_read_timeout(Some(Duration::from_millis(300)))
+                    .unwrap();
+            }
+            Ok(None) => break,
+            // After Exit, a read timeout means no straggler Data is coming.
+            Err(_) if exit.is_some() => break,
+            Err(e) => panic!("read error before exit: {e}"),
+        }
+    }
+    (acc, data_after_exit, exit)
+}
+
+#[test]
+fn final_data_precedes_exit_under_load() {
+    // A child that writes a burst then exits immediately — the exact shape that
+    // let the watcher's Exit race ahead of the reader's last Data.
+    const ITERS: usize = 40;
+    let script = r#"head -c 6000 /dev/zero | tr '\0' A; echo END; exit 7"#;
+
+    // Background CPU load to widen the scheduling window the old race needed.
+    let stop = std::sync::Arc::new(AtomicU32::new(0));
+    let mut burners = Vec::new();
+    for _ in 0..4 {
+        let stop = std::sync::Arc::clone(&stop);
+        burners.push(std::thread::spawn(move || {
+            let mut x: u64 = 0;
+            while stop.load(Ordering::Relaxed) == 0 {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                std::hint::black_box(x);
+            }
+        }));
+    }
+
+    let mut failures = Vec::new();
+    for i in 0..ITERS {
+        let dir = scratch_dir();
+        let uid = format!("ord{i}");
+        let holder = Holder::start(sh(&uid, script, &dir)).unwrap();
+
+        // Run the client on a worker so a hang surfaces as a failure, not a
+        // suite-wide block.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir2 = dir.clone();
+        let uid2 = uid.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(collect_frames(&dir2, &uid2));
+        });
+        let (acc, data_after_exit, exit) = match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(v) => v,
+            Err(_) => {
+                failures.push(format!("iter {i}: client did not complete (hang?)"));
+                drop(holder);
+                continue;
+            }
+        };
+
+        if data_after_exit {
+            failures.push(format!("iter {i}: a Data frame arrived AFTER Exit"));
+        }
+        if !contains(&acc, b"AAAAAEND") {
+            failures.push(format!(
+                "iter {i}: burst/END missing before Exit (len {})",
+                acc.len()
+            ));
+        }
+        match exit {
+            Some(Exit::Code(7)) => {}
+            other => failures.push(format!("iter {i}: expected exit code 7, got {other:?}")),
+        }
+        drop(holder);
+    }
+
+    stop.store(1, Ordering::Relaxed);
+    for b in burners {
+        let _ = b.join();
+    }
+
+    assert!(
+        failures.is_empty(),
+        "ordering guarantee violated in {}/{} iterations:\n{}",
+        failures.len(),
+        ITERS,
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn large_final_output_fully_precedes_exit() {
+    // A final burst larger than one 16 KiB Data frame (MAX_PAYLOAD) — it spans
+    // several frames, all of which must arrive before Exit.
+    let dir = scratch_dir();
+    let n = 40_000usize; // > 2 * 16 KiB
+    let script = format!(r#"head -c {n} /dev/zero | tr '\0' Z; echo TAIL-MARK; exit 5"#);
+    let holder = Holder::start(sh("big", &script, &dir)).unwrap();
+
+    let (acc, data_after_exit, exit) = collect_frames(&dir, "big");
+
+    assert!(
+        !data_after_exit,
+        "no Data frame may follow Exit (multi-chunk drain)"
+    );
+    let zeds = acc.iter().filter(|&&b| b == b'Z').count();
+    assert_eq!(
+        zeds, n,
+        "the entire multi-frame burst must arrive before Exit"
+    );
+    assert!(
+        contains(&acc, b"TAIL-MARK"),
+        "the trailing marker must arrive before Exit"
+    );
+    assert_eq!(exit, Some(Exit::Code(5)), "exit code must still propagate");
     drop(holder);
 }
