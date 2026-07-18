@@ -22,7 +22,8 @@
 //!
 //! * [`Config`] / [`Holder`] — open the pty, exec the agent, serve the socket.
 //! * [`Client`] — dial a holder programmatically (the engine/pm/tests).
-//! * [`attach`] — the interactive `hold-attach` terminal loop.
+//! * [`attach`] — the interactive `disponent attach` terminal loop
+//!   (reader-default; `--write` requests the writer lock — M2a).
 //! * [`protocol`] — the framed wire format (see its module docs).
 
 pub mod client;
@@ -32,6 +33,6 @@ mod ring;
 pub mod server;
 
 pub use client::{attach, Client};
-pub use protocol::{Exit, ServerFrame};
+pub use protocol::{Exit, Role, ServerFrame};
 pub use pty::WinSize;
 pub use server::{daemonize, default_socket_dir, socket_path, Config, Holder};

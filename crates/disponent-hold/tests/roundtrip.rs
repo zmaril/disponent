@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use disponent_hold::protocol::ServerFrame;
-use disponent_hold::{Client, Config, Exit, Holder};
+use disponent_hold::{Client, Config, Exit, Holder, Role};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -90,7 +90,8 @@ fn round_trip_input_output_and_exit_code() {
 /// `Exit` frame under load), drain frames accumulating `Data` and capturing the
 /// `Exit`, and stop only once BOTH have been seen — tolerating either order.
 fn client_round_trip(dir: &Path) -> anyhow::Result<Exit> {
-    let mut c = Client::connect_uid(Some(dir), "rt")?;
+    // This client sends input, so it must hold the writer lock (M2a).
+    let mut c = Client::connect_uid_as(Some(dir), "rt", Role::Writer)?;
 
     // "hello" is printed before the child blocks on `read`, so it cannot race
     // the exit — a plain read-until is safe here.
@@ -185,7 +186,8 @@ fn resize_reaches_the_child() {
     ))
     .unwrap();
 
-    let mut c = Client::connect_uid(Some(&dir), "resize").unwrap();
+    // Resizing is a writer act (M2a), so hold the writer lock.
+    let mut c = Client::connect_uid_as(Some(&dir), "resize", Role::Writer).unwrap();
     // Resize before the child reads its size. The ioctl path must not error.
     c.send_resize(90, 30).expect("resize ioctl must succeed");
 
@@ -203,6 +205,174 @@ fn resize_reaches_the_child() {
     assert!(
         out.contains("30 90"),
         "child's stty size should reflect the resize, got: {out:?}"
+    );
+    drop(holder);
+}
+
+// ---------------------------------------------------------------------------
+// M2a: the single-writer / multi-reader lock (design §6).
+// ---------------------------------------------------------------------------
+
+/// Retry a writer connection until it is granted or the deadline passes — the
+/// holder frees the lock asynchronously when the previous writer's socket EOFs,
+/// so a fresh acquire may need a beat.
+fn connect_writer_when_free(dir: &Path, uid: &str, secs: u64) -> Client {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Ok(c) = Client::connect_writer(&disponent_hold::socket_path(Some(dir), uid)) {
+            return c;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("writer lock never freed within {secs}s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn first_writer_is_granted_and_a_second_is_denied_read_only() {
+    let dir = scratch_dir();
+    let holder = Holder::start(sh("wlock", r#"sleep 3; exit 0"#, &dir)).unwrap();
+
+    // The first Writer request wins the lock.
+    let w1 = Client::connect_uid_as(Some(&dir), "wlock", Role::Writer).unwrap();
+    assert_eq!(w1.granted_role(), Role::Writer, "first writer is granted");
+    assert!(!w1.writer_busy());
+
+    // A second, concurrent Writer request is admitted as a read-only Reader.
+    let w2 = Client::connect_uid_as(Some(&dir), "wlock", Role::Writer).unwrap();
+    assert_eq!(
+        w2.granted_role(),
+        Role::Reader,
+        "a second writer is denied and admitted read-only"
+    );
+    assert!(w2.writer_busy(), "the denial is reported as writer_busy");
+
+    // A plain reader is of course still a reader.
+    let r = Client::connect_uid(Some(&dir), "wlock").unwrap();
+    assert_eq!(r.granted_role(), Role::Reader);
+    assert!(!r.writer_busy());
+
+    drop(w1);
+    drop(holder);
+}
+
+#[test]
+fn only_the_writers_input_reaches_the_child() {
+    let dir = scratch_dir();
+    // The child echoes the single line it reads from stdin.
+    let holder = Holder::start(sh(
+        "wonly",
+        r#"read x; echo "READ:[$x]"; sleep 2; exit 0"#,
+        &dir,
+    ))
+    .unwrap();
+
+    // An observer reader watches the output.
+    let mut obs = Client::connect_uid(Some(&dir), "wonly").unwrap();
+
+    // A read-only client's input must be ignored by the holder.
+    let mut reader = Client::connect_uid(Some(&dir), "wonly").unwrap();
+    assert_eq!(reader.granted_role(), Role::Reader);
+    reader.send_input(b"from-reader\n").unwrap();
+
+    // Give the holder a beat to (not) process the reader's ignored input.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // The writer's input is what reaches the child's `read x`.
+    let mut writer = Client::connect_uid_as(Some(&dir), "wonly", Role::Writer).unwrap();
+    assert_eq!(writer.granted_role(), Role::Writer);
+    writer.send_input(b"from-writer\n").unwrap();
+
+    let seen = obs.read_until(b"READ:[").unwrap();
+    // Drain a little more so the whole echoed line is captured.
+    let mut acc = seen;
+    let more = obs.read_until(b"]").unwrap_or_default();
+    acc.extend_from_slice(&more);
+    let out = String::from_utf8_lossy(&acc);
+    assert!(
+        out.contains("from-writer"),
+        "the writer's input must reach the child, got {out:?}"
+    );
+    assert!(
+        !out.contains("from-reader"),
+        "a reader's input must NOT reach the child, got {out:?}"
+    );
+    drop(holder);
+}
+
+#[test]
+fn writer_lock_frees_when_the_writer_disconnects() {
+    let dir = scratch_dir();
+    let holder = Holder::start(sh(
+        "wfree",
+        r#"read x; echo "READ:[$x]"; sleep 2; exit 0"#,
+        &dir,
+    ))
+    .unwrap();
+
+    // First writer takes the lock, then leaves.
+    let w1 = Client::connect_uid_as(Some(&dir), "wfree", Role::Writer).unwrap();
+    assert_eq!(w1.granted_role(), Role::Writer);
+    // While w1 holds it, a fresh writer request is denied.
+    let denied = Client::connect_uid_as(Some(&dir), "wfree", Role::Writer).unwrap();
+    assert_eq!(denied.granted_role(), Role::Reader);
+    drop(denied);
+    drop(w1);
+
+    // After w1 disconnects the lock frees, so a new writer can acquire it and
+    // its input reaches the child.
+    let mut w2 = connect_writer_when_free(&dir, "wfree", 5);
+    let mut obs = Client::connect_uid(Some(&dir), "wfree").unwrap();
+    w2.send_input(b"second-writer\n").unwrap();
+    let seen = obs.read_until(b"second-writer").unwrap();
+    assert!(String::from_utf8_lossy(&seen).contains("second-writer"));
+    drop(holder);
+}
+
+#[test]
+fn connect_writer_errors_when_the_lock_is_held() {
+    let dir = scratch_dir();
+    let holder = Holder::start(sh("werr", r#"sleep 3; exit 0"#, &dir)).unwrap();
+
+    // Hold the writer with a long-lived interactive-style attacher.
+    let held = Client::connect_uid_as(Some(&dir), "werr", Role::Writer).unwrap();
+    assert_eq!(held.granted_role(), Role::Writer);
+
+    // The engine's `send` path (connect_writer) must fail honestly, not drop.
+    let msg = match Client::connect_writer(&disponent_hold::socket_path(Some(&dir), "werr")) {
+        Ok(_) => panic!("a second writer connection must be denied, not granted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("writer channel held"),
+        "expected an honest writer-held error, got {msg:?}"
+    );
+
+    drop(held);
+    // Once freed, connect_writer succeeds.
+    let ok = connect_writer_when_free(&dir, "werr", 5);
+    assert_eq!(ok.granted_role(), Role::Writer);
+    drop(holder);
+}
+
+#[test]
+fn a_reader_still_gets_live_data_while_a_writer_drives() {
+    let dir = scratch_dir();
+    let holder = Holder::start(sh(
+        "rw",
+        r#"sleep 0.4; echo shared-line-xyz; sleep 2; exit 0"#,
+        &dir,
+    ))
+    .unwrap();
+
+    // A writer and a reader both attach before the line is printed.
+    let _w = Client::connect_uid_as(Some(&dir), "rw", Role::Writer).unwrap();
+    let mut r = Client::connect_uid(Some(&dir), "rw").unwrap();
+    let seen = r.read_until(b"shared-line-xyz").unwrap();
+    assert!(
+        String::from_utf8_lossy(&seen).contains("shared-line-xyz"),
+        "a reader must keep receiving live Data alongside a writer"
     );
     drop(holder);
 }
