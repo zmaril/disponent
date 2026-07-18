@@ -55,10 +55,20 @@ fn modal_dispatch_runs_sends_cancels_reaps() {
     assert!(url.starts_with("https://"), "tunnel url: {url}");
     assert_eq!(handle["workspaceUrl"].as_str().unwrap(), url);
 
-    // send lands on the running worker and records the supervisor message
-    engine
-        .send(session.uid.clone(), "how's it going?".into())
+    // a Manager send to the running worker mints a Message (recipient=worker,
+    // sender=manager) and projects a `mail` breadcrumb on its timeline (exact).
+    let minted = engine
+        .send(
+            "how's it going?".into(),
+            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
+            None,
+            None,
+        )
         .unwrap();
+    assert_eq!(minted.len(), 1);
+    assert_eq!(minted[0].sender, "manager");
+    assert_eq!(minted[0].recipient, "worker");
+    assert_eq!(minted[0].session_uid, session.uid);
     let last = engine
         .events(
             Some(serde_json::from_value(serde_json::json!({"sessionUid": session.uid})).unwrap()),
@@ -66,8 +76,9 @@ fn modal_dispatch_runs_sends_cancels_reaps() {
             None,
         )
         .unwrap();
-    assert_eq!(last[0].kind, "message");
-    assert_eq!(last[0].payload["payload"]["role"], "supervisor");
+    assert_eq!(last[0].kind, "mail");
+    assert_eq!(last[0].fidelity, "exact");
+    assert_eq!(last[0].payload["payload"]["messageId"], minted[0].id);
 
     // cancel stops the agent, keeps the sandbox handle; reap clears the board
     let cancelled = engine.cancel(session.uid.clone()).unwrap();
@@ -76,7 +87,17 @@ fn modal_dispatch_runs_sends_cancels_reaps() {
         cancelled.env_handle.is_some(),
         "sandbox kept for inspection"
     );
-    assert!(engine.send(session.uid.clone(), "hello?".into()).is_err());
+    // a send to a non-running anchor still records a durable Message (the
+    // recipient pulls it) — it just isn't delivered to a live prompt.
+    let after_cancel = engine
+        .send(
+            "hello?".into(),
+            Some(serde_json::from_value(serde_json::json!({"sessions": [session.uid]})).unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(after_cancel.len(), 1);
     let reaped = engine.reap(session.uid.clone()).unwrap();
     assert!(reaped.reaped_at.is_some());
 }
