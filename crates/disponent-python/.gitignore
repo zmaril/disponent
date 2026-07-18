@@ -6,3 +6,8 @@ __pycache__/
 dist/
 *.egg-info/
 .pytest_cache/
+# coverage (pytest --cov)
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
