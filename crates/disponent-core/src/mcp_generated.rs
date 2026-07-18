@@ -20,6 +20,8 @@ pub struct DispatchSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_remote: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<String>,
@@ -432,6 +434,9 @@ pub const TOOLS_JSON: &str = r###"{
               },
               "env": {
                 "type": "string"
+              },
+              "fetchRemote": {
+                "type": "boolean"
               },
               "gitRef": {
                 "type": "string"

@@ -56,6 +56,7 @@ pub const PG_TABLES: &[TableSchema] = &[
   "repo" text,
   "git_ref" text,
   "isolation" text NOT NULL,
+  "fetch_remote" boolean,
   "template_name" text,
   "setup" text,
   "env_slug" text NOT NULL,
@@ -234,6 +235,7 @@ pub const SQLITE_TABLES: &[TableSchema] = &[
   "repo" text,
   "git_ref" text,
   "isolation" text NOT NULL,
+  "fetch_remote" integer,
   "template_name" text,
   "setup" text,
   "env_slug" text NOT NULL,
@@ -412,6 +414,7 @@ pub const DUCKDB_TABLES: &[TableSchema] = &[
   "repo" text,
   "git_ref" text,
   "isolation" text NOT NULL,
+  "fetch_remote" boolean,
   "template_name" text,
   "setup" text,
   "env_slug" text NOT NULL,
@@ -548,4 +551,5 @@ pub const DUCKDB_TABLES: &[TableSchema] = &[
 ];
 
 /// Every BOOLEAN `(table, column)` in the schema — for coercing SQLite's 0/1.
-pub const BOOL_COLUMNS: &[(&str, &str)] = &[("offerings", "is_default")];
+pub const BOOL_COLUMNS: &[(&str, &str)] =
+    &[("dispatches", "fetch_remote"), ("offerings", "is_default")];

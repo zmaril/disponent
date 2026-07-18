@@ -200,6 +200,10 @@ model Dispatch {
   gitRef?: string;
   isolation: IsolationKind = IsolationKind.none;
 
+  /** Fetch gitRef from the workspace's origin and cut the worktree off it,
+   * rather than off local HEAD. */
+  fetchRemote?: boolean;
+
   @fk(#["template_name"]) template?: Template;
 
   /** Per-dispatch setup script — runs after the template's setup and the repo clone. */
@@ -405,6 +409,10 @@ model DispatchSpec {
   repo?: string;
   gitRef?: string;
   isolation?: IsolationKind;
+
+  /** Fetch gitRef from the workspace's origin and cut the worktree off it,
+   * rather than off local HEAD. */
+  fetchRemote?: boolean;
 
   /** Named template to boot from. */
   template?: string;
