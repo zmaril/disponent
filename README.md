@@ -1,3 +1,5 @@
+<!-- housekeeper:description Dispatch work to coding agents — locally or on remote environments — with capability-graded observation and an MCP surface -->
+<!-- housekeeper:topics coding-agents, dispatch, mcp, rust, tmux -->
 <p align="center"><img src="assets/logo.png" alt="disponent" width="200"></p>
 
 # disponent
