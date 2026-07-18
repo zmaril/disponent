@@ -553,6 +553,7 @@ pub struct DispatchSpec {
     pub repo: Option<String>,
     pub git_ref: Option<String>,
     pub isolation: Option<IsolationKind>,
+    pub fetch_remote: Option<bool>,
     pub template: Option<String>,
     pub setup: Option<String>,
     pub timeout_secs: Option<i32>,
@@ -1052,31 +1053,35 @@ impl Disponent {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
-        let template: Option<String> = match args.get(8).copied() {
+        let fetch_remote: Option<bool> = match args.get(8).copied() {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
-        let setup: Option<String> = match args.get(9).copied() {
+        let template: Option<String> = match args.get(9).copied() {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
-        let timeout_secs: Option<i32> = match args.get(10).copied() {
+        let setup: Option<String> = match args.get(10).copied() {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
-        let max_budget: Option<String> = match args.get(11).copied() {
+        let timeout_secs: Option<i32> = match args.get(11).copied() {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
-        let unchecked: Option<bool> = match args.get(12).copied() {
+        let max_budget: Option<String> = match args.get(12).copied() {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
-        let tags: Option<Vec<String>> = match args.get(13).copied() {
+        let unchecked: Option<bool> = match args.get(13).copied() {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
-        let labels: Option<String> = match args.get(14).copied() {
+        let tags: Option<Vec<String>> = match args.get(14).copied() {
+            Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
+            _ => None,
+        };
+        let labels: Option<String> = match args.get(15).copied() {
             Some(v) if !v.is_nil() => Some(magnus::TryConvert::try_convert(v)?),
             _ => None,
         };
@@ -1093,6 +1098,7 @@ impl Disponent {
             repo,
             git_ref,
             isolation,
+            fetch_remote,
             template,
             setup,
             timeout_secs,

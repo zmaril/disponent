@@ -269,6 +269,17 @@ impl EnvProvider for LocalTmux {
             }
             Ok(())
         };
+        // A predicate variant: did the command succeed? (used to probe which
+        // start-point a fetch_remote worktree should cut off).
+        let sh_ok = |script: &str, dir: &std::path::Path| -> bool {
+            Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .current_dir(dir)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
 
         // clone (or worktree) → setup, the same order as the remote setup. The
         // agent is NOT launched here — the engine `spawn`s it onto the shell this
@@ -284,20 +295,79 @@ impl EnvProvider for LocalTmux {
                 Some(parent) => {
                     // git worktree add needs the target to not already exist.
                     std::fs::remove_dir_all(&task).ok();
-                    // A named git_ref selects the worktree's branch with `-B`
-                    // (create-or-reset off HEAD, so re-dispatching the same ref
-                    // doesn't fail on an existing branch); no ref → a fresh,
-                    // uid-unique `disponent/<uid>` branch via `-b`.
-                    let branch_flag = match req.git_ref.as_deref().filter(|r| !r.is_empty()) {
-                        Some(git_ref) => format!("-B {}", shq(git_ref)),
-                        None => format!("-b {}", shq(&format!("disponent/{}", req.session_uid))),
+                    let parent_s = parent.display().to_string();
+                    let task_s = task.display().to_string();
+                    let git_ref = req.git_ref.as_deref().filter(|r| !r.is_empty());
+                    let cmd = if req.fetch_remote {
+                        // Teleport path: fetch the branch from the workspace's
+                        // origin and cut the worktree off THAT remote tip (pm's
+                        // worktreeAddRemote), not off local HEAD — so a branch
+                        // that only exists on the remote is checked out at its
+                        // pushed tip. Needs a named ref (the branch to fetch).
+                        let branch = git_ref.ok_or_else(|| {
+                            anyhow!("fetch_remote worktree needs a git_ref (the branch to fetch)")
+                        })?;
+                        sh(
+                            &format!("git -C {} fetch origin {}", shq(&parent_s), shq(branch)),
+                            &work,
+                            "fetch",
+                        )?;
+                        let ref_exists = |full: &str| {
+                            sh_ok(
+                                &format!(
+                                    "git -C {} show-ref --verify --quiet {}",
+                                    shq(&parent_s),
+                                    shq(full)
+                                ),
+                                &work,
+                            )
+                        };
+                        if ref_exists(&format!("refs/heads/{branch}")) {
+                            // an existing local branch — check it out as-is
+                            format!(
+                                "git -C {} worktree add {} {}",
+                                shq(&parent_s),
+                                shq(&task_s),
+                                shq(branch),
+                            )
+                        } else if ref_exists(&format!("refs/remotes/origin/{branch}")) {
+                            // create the local branch off the fetched origin ref
+                            format!(
+                                "git -C {} worktree add -b {} {} {}",
+                                shq(&parent_s),
+                                shq(branch),
+                                shq(&task_s),
+                                shq(&format!("origin/{branch}")),
+                            )
+                        } else {
+                            // origin doesn't have it either — fall back to a
+                            // branch off HEAD, honestly (no remote tip to use).
+                            format!(
+                                "git -C {} worktree add -B {} {}",
+                                shq(&parent_s),
+                                shq(branch),
+                                shq(&task_s),
+                            )
+                        }
+                    } else {
+                        // Default: a named git_ref selects the worktree's branch
+                        // with `-B` (create-or-reset off HEAD, so re-dispatching
+                        // the same ref doesn't fail on an existing branch); no
+                        // ref → a fresh, uid-unique `disponent/<uid>` branch via
+                        // `-b`.
+                        let branch_flag = match git_ref {
+                            Some(git_ref) => format!("-B {}", shq(git_ref)),
+                            None => {
+                                format!("-b {}", shq(&format!("disponent/{}", req.session_uid)))
+                            }
+                        };
+                        format!(
+                            "git -C {} worktree add {} {}",
+                            shq(&parent_s),
+                            branch_flag,
+                            shq(&task_s),
+                        )
                     };
-                    let cmd = format!(
-                        "git -C {} worktree add {} {}",
-                        shq(&parent.display().to_string()),
-                        branch_flag,
-                        shq(&task.display().to_string()),
-                    );
                     sh(&cmd, &work, "worktree")?;
                     // Record the parent repo so reap can deregister the worktree
                     // (a bare rm -rf would leave a dangling registration).
@@ -797,6 +867,7 @@ fn holder_stream_reader(mut client: disponent_hold::Client, tx: mpsc::Sender<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn gh_slugs_vs_clonable_urls_and_paths() {
@@ -816,6 +887,109 @@ mod tests {
         assert!(h["workDir"].as_str().unwrap().ends_with("abc-123"));
     }
 
+    // Run git in `dir`, panicking (with output) on failure. `-c user.*` keeps
+    // commits working on a machine with no git identity configured.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    // A `fetch_remote` worktree dispatch must fetch the named branch from the
+    // workspace's origin and cut the worktree off THAT remote tip — the pushed
+    // commit, not local HEAD (pm's teleport provisioning). Transport-agnostic:
+    // this is the tmux path, but the git plumbing is what's under test.
+    #[test]
+    fn fetch_remote_worktree_checks_out_the_pushed_ref_not_local_head() {
+        let base = std::env::temp_dir().join(format!("dsp-fetchremote-{}", Uuid::now_v7()));
+        let seed = base.join("seed");
+        let clone = base.join("clone");
+        std::fs::create_dir_all(&base).unwrap();
+
+        // A bare "origin" plus a seed working repo: base commit on `main`
+        // (pushed), then a distinctive marker on branch `pm/task-1-demo`
+        // (pushed). The clone is taken BEFORE the branch exists on the remote,
+        // so it can only reach the branch by fetching — proving the fetch path.
+        git(&base, &["init", "--bare", "-b", "main", "remote.git"]);
+        git(&base, &["init", "-b", "main", "seed"]);
+        std::fs::write(seed.join("base.txt"), "base").unwrap();
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-m", "base"]);
+        git(&seed, &["remote", "add", "origin", "../remote.git"]);
+        git(&seed, &["push", "-u", "origin", "main"]);
+
+        // Clone now — the clone knows only `main`, not the branch we push next.
+        git(&base, &["clone", "remote.git", "clone"]);
+        let clone_main_head = git(&clone, &["rev-parse", "HEAD"]);
+
+        git(&seed, &["checkout", "-b", "pm/task-1-demo"]);
+        std::fs::write(seed.join("TELEPORT_MARKER.txt"), "teleport").unwrap();
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-m", "marker"]);
+        git(&seed, &["push", "origin", "pm/task-1-demo"]);
+        let pushed_head = git(&seed, &["rev-parse", "HEAD"]);
+
+        // Provision a worktree dispatch off the CLONE (its origin is the bare
+        // repo). A sandboxed tmux backend on its own socket; a stub agent (the
+        // agent isn't launched by start()).
+        let socket = format!("dsp-fr-{}", std::process::id());
+        let root = base.join("work");
+        let backend = LocalTmux::sandboxed(&socket, root.clone(), "echo stub-agent");
+        let uid = Uuid::now_v7().to_string();
+        let req = StartRequest {
+            session_uid: uid.clone(),
+            template: None,
+            repo: Some(clone.display().to_string()),
+            isolation: Some("worktree".into()),
+            git_ref: Some("pm/task-1-demo".into()),
+            fetch_remote: true,
+            setup: None,
+            brief: "b".into(),
+            otel_endpoint: None,
+        };
+
+        let provisioned = backend.start(&req).expect("start");
+        // Tear the tmux session + worktree down no matter what the asserts do.
+        let cleanup = || {
+            let _ = Command::new("tmux")
+                .args(["-L", &socket, "kill-server"])
+                .output();
+            let _ = backend.reap(&provisioned.handle);
+            let _ = std::fs::remove_dir_all(&base);
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let task = root.join(&uid).join("task");
+            // fetch + off-origin: the worktree carries the PUSHED commit (marker
+            // present) and its HEAD is the pushed tip — NOT the clone's local
+            // `main` HEAD (which never saw the marker).
+            assert!(
+                task.join("TELEPORT_MARKER.txt").exists(),
+                "worktree should hold the branch's pushed marker file"
+            );
+            let worktree_head = git(&task, &["rev-parse", "HEAD"]);
+            assert_eq!(
+                worktree_head, pushed_head,
+                "worktree HEAD is the pushed tip"
+            );
+            assert_ne!(
+                worktree_head, clone_main_head,
+                "worktree HEAD must not be the clone's local main HEAD"
+            );
+        }));
+        cleanup();
+        result.unwrap();
+    }
+
     #[test]
     fn launch_spec_cats_the_brief() {
         // The adapter spawns the composed command onto the shell START opened;
@@ -828,6 +1002,7 @@ mod tests {
             repo: None,
             isolation: None,
             git_ref: None,
+            fetch_remote: false,
             setup: None,
             brief: "b".into(),
             otel_endpoint: None,

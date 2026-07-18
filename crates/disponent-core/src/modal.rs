@@ -559,6 +559,7 @@ mod tests {
             repo: repo.map(String::from),
             isolation: None,
             git_ref: None,
+            fetch_remote: false,
             setup: Some("cargo build".into()),
             brief: "do the thing".into(),
             otel_endpoint: None,
