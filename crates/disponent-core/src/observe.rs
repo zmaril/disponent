@@ -17,7 +17,9 @@
 //! dependency), keeping this module transport-agnostic.
 
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Duration;
 
+use fluessig::observe::{ObserverPool, Poll};
 use serde_json::json;
 
 /// One observed change, ready to become an events-table row.
@@ -165,6 +167,51 @@ fn chunk_observation(chunk: StreamChunk) -> Option<Observation> {
         StreamChunk::Data(_) | StreamChunk::Heartbeat => None,
         StreamChunk::Exit { code, signal } => Some(exit_observation(code, signal)),
     }
+}
+
+/// Spawn a pool observer that consumes a holder's live [`TerminalStream`] — the
+/// exact tier the M1 follow-up wires into the engine. Each interval it drains
+/// whatever chunks are ready into `exact` [`Observation`]s (byte-exact frames,
+/// and the child's real [`Exit`](StreamChunk::Exit)); when the stream yields its
+/// terminal exit — or the holder connection closes — it ends the subject with
+/// [`Poll::Done`], so the observer thread stops (no leak) and the collector can
+/// fold the exit into a completed/failed transition. Draining is non-blocking,
+/// so a quiet stream costs nothing; the holder's `Exit` is what actually ends it.
+pub fn spawn_exact_observer(
+    observers: &ObserverPool<Observation>,
+    uid: &str,
+    interval: Duration,
+    stream: TerminalStream,
+) {
+    observers.spawn(uid.to_string(), interval, move || {
+        let mut items = Vec::new();
+        let mut ended = false;
+        loop {
+            match stream.try_recv() {
+                Ok(chunk) => {
+                    if matches!(chunk, StreamChunk::Exit { .. }) {
+                        ended = true;
+                    }
+                    if let Some(obs) = chunk_observation(chunk) {
+                        items.push(obs);
+                    }
+                }
+                // Empty = drained but still open (keep observing); Disconnected =
+                // the holder reader is gone (an exit we already saw, or a dropped
+                // connection) — end the subject either way.
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    ended = true;
+                    break;
+                }
+            }
+        }
+        Ok(if ended {
+            Poll::Done(items)
+        } else {
+            Poll::Items(items)
+        })
+    });
 }
 
 #[cfg(test)]
