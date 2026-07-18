@@ -3,9 +3,12 @@
 //!
 //! Threads (all sync — no async in this crate, the entl discipline):
 //! * **reader** — drains the pty master into the bounded ring and broadcasts
-//!   each chunk as `Data` frames.
-//! * **watcher** — `wait`s the child, records the exit, broadcasts an `Exit`
-//!   frame, and wakes anyone in [`Holder::wait_for_exit`].
+//!   each chunk as `Data` frames. On EOF (the pty is fully drained) it emits the
+//!   `Exit` frame using the status the watcher recorded, so the final `Data`
+//!   always precedes `Exit` per client — the byte-exact ordering guarantee.
+//! * **watcher** — `wait`s the child and *records* the exit status into shared
+//!   state; it does not broadcast the frame itself. The reader owns `Exit`
+//!   emission so ordering against the last `Data` is deterministic.
 //! * **heartbeat** — periodic empty `Heartbeat` frames so a dead client (no
 //!   clean EOF) surfaces as a `BrokenPipe` and is dropped.
 //! * **accept** — the unix listener; one reader thread + one writer thread per
@@ -119,7 +122,15 @@ struct Client {
 struct Inner {
     ring: Ring,
     clients: Vec<Client>,
+    /// The *published* exit: set by the reader once it has drained the pty to
+    /// EOF and broadcast the `Exit` frame. Drives [`Holder::wait_for_exit`],
+    /// [`Holder::exit`], the late-client replay, and the shutdown kill check.
     exit: Option<Exit>,
+    /// The child's reaped status, recorded by the watcher after `waitpid` but
+    /// *before* the reader has finished draining. The reader blocks on this
+    /// (via `cv`) at EOF, then promotes it to `exit` and emits the frame — so
+    /// the final `Data` is always enqueued before `Exit`, per client.
+    reaped: Option<Exit>,
     next_id: u64,
     /// The id of the client currently holding the single writer lock (design
     /// §6), or `None` when the writer channel is free. At most one at a time.
@@ -187,6 +198,7 @@ impl Holder {
                 ring: Ring::new(config.ring_bytes),
                 clients: Vec::new(),
                 exit: None,
+                reaped: None,
                 next_id: 0,
                 writer_id: None,
             }),
@@ -285,8 +297,12 @@ impl Drop for Holder {
     }
 }
 
-/// Drain the pty master forever: push each chunk to the ring and broadcast it as
-/// `Data` frames. Ends on EOF or EIO (the slave closed when the child exited).
+/// Drain the pty master: push each chunk to the ring and broadcast it as `Data`
+/// frames. Ends on EOF or EIO (the slave closed once the child exited *and* all
+/// its output was consumed). Because the reader is the single thread draining
+/// the master, reaching EOF means every `Data` chunk has already been enqueued
+/// to each client — so the reader then emits the `Exit` frame ([`emit_exit`]),
+/// guaranteeing the final `Data` precedes `Exit` per client.
 fn reader_loop(mut master: std::fs::File, shared: Arc<Shared>) {
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -307,10 +323,37 @@ fn reader_loop(mut master: std::fs::File, shared: Arc<Shared>) {
             Err(_) => break,
         }
     }
+    // The pty is drained. Emit `Exit` now — after the last `Data` above — so a
+    // client can never see `Exit` before the child's final output.
+    emit_exit(&shared);
 }
 
-/// Wait the child, record how it ended, broadcast an `Exit` frame, and wake
-/// `wait_for_exit`.
+/// Publish the `Exit` frame. Called by the reader once the pty is fully drained.
+/// Blocks (no busy-spin) until the watcher has recorded the reaped status —
+/// EOF on the master can be observed before `waitpid` returns, and we must not
+/// emit `Exit` with a bogus status. Enqueues the frame onto every client's queue
+/// (after every `Data`), records the published exit, and wakes `wait_for_exit`.
+fn emit_exit(shared: &Arc<Shared>) {
+    let mut inner = shared.inner.lock().unwrap();
+    while inner.reaped.is_none() {
+        inner = shared.cv.wait(inner).unwrap();
+    }
+    // Idempotent: never double-publish (the watcher may also drive shutdown).
+    if inner.exit.is_some() {
+        return;
+    }
+    let exit = inner.reaped.expect("reaped set by the loop above");
+    let frame = encode_server(ServerKind::Exit, &exit.to_payload());
+    inner.exit = Some(exit);
+    inner.clients.retain(|c| c.tx.send(frame.clone()).is_ok());
+    shared.cv.notify_all();
+}
+
+/// Wait the child and *record* how it ended into shared state, then wake the
+/// reader (which owns `Exit` emission — see [`reader_loop`]) and any
+/// `wait_for_exit` waiters. This thread does not broadcast the `Exit` frame:
+/// letting the reader emit it after EOF is what makes the final `Data`→`Exit`
+/// ordering deterministic per client.
 fn watcher_loop(mut child: std::process::Child, shared: Arc<Shared>) {
     use std::os::unix::process::ExitStatusExt;
     let exit = match child.wait() {
@@ -326,10 +369,8 @@ fn watcher_loop(mut child: std::process::Child, shared: Arc<Shared>) {
         // waitpid failing is unusual; report it honestly rather than fake a 0.
         Err(_) => Exit::Code(-1),
     };
-    let frame = encode_server(ServerKind::Exit, &exit.to_payload());
     let mut inner = shared.inner.lock().unwrap();
-    inner.exit = Some(exit);
-    inner.clients.retain(|c| c.tx.send(frame.clone()).is_ok());
+    inner.reaped = Some(exit);
     shared.cv.notify_all();
 }
 
