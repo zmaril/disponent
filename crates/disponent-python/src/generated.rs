@@ -331,6 +331,7 @@ pub struct DispatchSpec {
     pub repo: Option<String>,
     pub git_ref: Option<String>,
     pub isolation: Option<IsolationKind>,
+    pub fetch_remote: Option<bool>,
     pub template: Option<String>,
     pub setup: Option<String>,
     pub timeout_secs: Option<i32>,
@@ -342,7 +343,7 @@ pub struct DispatchSpec {
 #[pymethods]
 impl DispatchSpec {
     #[new]
-    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
+    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, fetch_remote=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
     fn new(
         brief: String,
         env: String,
@@ -352,6 +353,7 @@ impl DispatchSpec {
         repo: Option<String>,
         git_ref: Option<String>,
         isolation: Option<IsolationKind>,
+        fetch_remote: Option<bool>,
         template: Option<String>,
         setup: Option<String>,
         timeout_secs: Option<i32>,
@@ -369,6 +371,7 @@ impl DispatchSpec {
             repo,
             git_ref,
             isolation,
+            fetch_remote,
             template,
             setup,
             timeout_secs,
@@ -909,7 +912,7 @@ impl Disponent {
         let core = self.core.clone();
         py.detach(move || core.capabilities()).map_err(err)
     }
-    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
+    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, fetch_remote=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
     fn dispatch(
         &self,
         py: Python<'_>,
@@ -921,6 +924,7 @@ impl Disponent {
         repo: Option<String>,
         git_ref: Option<String>,
         isolation: Option<IsolationKind>,
+        fetch_remote: Option<bool>,
         template: Option<String>,
         setup: Option<String>,
         timeout_secs: Option<i32>,
@@ -938,6 +942,7 @@ impl Disponent {
             repo,
             git_ref,
             isolation,
+            fetch_remote,
             template,
             setup,
             timeout_secs,

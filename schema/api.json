@@ -241,6 +241,11 @@
           "nullable": true
         },
         {
+          "name": "fetchRemote",
+          "type": "boolean",
+          "nullable": true
+        },
+        {
           "name": "template",
           "type": "string",
           "nullable": true

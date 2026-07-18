@@ -294,6 +294,7 @@ pub struct DispatchSpec {
     pub repo: Option<String>,
     pub git_ref: Option<String>,
     pub isolation: Option<IsolationKind>,
+    pub fetch_remote: Option<bool>,
     pub template: Option<String>,
     pub setup: Option<String>,
     pub timeout_secs: Option<i32>,

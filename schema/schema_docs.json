@@ -141,6 +141,14 @@
       },
       {
         "def": null,
+        "desc": "Fetch gitRef from the workspace's origin and cut the worktree off it,\nrather than off local HEAD.",
+        "name": "fetch_remote",
+        "notNull": false,
+        "pk": false,
+        "type": "boolean"
+      },
+      {
+        "def": null,
         "desc": null,
         "name": "template_name",
         "notNull": false,

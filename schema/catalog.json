@@ -720,6 +720,15 @@
           "nullable": false
         },
         {
+          "name": "fetchRemote",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": true,
+          "doc": "Fetch gitRef from the workspace's origin and cut the worktree off it,\nrather than off local HEAD."
+        },
+        {
           "name": "template",
           "type": {
             "k": "ref",
@@ -1683,6 +1692,15 @@
             "name": "IsolationKind"
           },
           "nullable": true
+        },
+        {
+          "name": "fetchRemote",
+          "type": {
+            "k": "scalar",
+            "name": "boolean"
+          },
+          "nullable": true,
+          "doc": "Fetch gitRef from the workspace's origin and cut the worktree off it,\nrather than off local HEAD."
         },
         {
           "name": "template",

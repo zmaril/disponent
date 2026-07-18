@@ -56,6 +56,10 @@ pub struct StartRequest {
     /// worktree's branch (create-or-reset via `-B`); None → a fresh
     /// `disponent/<uid>` branch.
     pub git_ref: Option<String>,
+    /// Fetch `git_ref` from the workspace's origin and cut the worktree off it,
+    /// rather than off local HEAD. Only meaningful for worktree isolation on a
+    /// local git repo; ignored otherwise (exe.dev / holder don't consult it).
+    pub fetch_remote: bool,
     /// Per-dispatch setup, run after the template's baseline and the clone.
     pub setup: Option<String>,
     pub brief: String,
@@ -744,6 +748,7 @@ mod tests {
             repo: repo.map(String::from),
             isolation: None,
             git_ref: None,
+            fetch_remote: false,
             setup: setup.map(String::from),
             brief: "do the thing".into(),
             otel_endpoint: None,
