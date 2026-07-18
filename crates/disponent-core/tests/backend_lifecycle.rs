@@ -2,6 +2,11 @@
 //! provisions in the background and the session reaches `running` with a
 //! handle + url; send records the supervisor message; cancel stops the agent
 //! but keeps the VM; reap tears down; reconcile marks vanished workers lost.
+//!
+//! straitjacket-allow-file:duplication — `modal_lifecycle.rs` mirrors this
+//! exe.dev lifecycle test faithfully by design (same `spec`/`wait_for` helpers
+//! and the same dispatch → running → send → cancel → reap dance over the
+//! dry-run backend); the parallel blocks are intentional, per-backend copies.
 
 use std::time::Duration;
 

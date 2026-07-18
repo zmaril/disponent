@@ -26,7 +26,7 @@ test("the whole lifecycle from JS", async () => {
   const d = new Disponent({ sink: "none" });
 
   const envs = await d.environments();
-  expect(envs.map((e: any) => e.slug)).toEqual(["local", "exe-dev"]);
+  expect(envs.map((e: any) => e.slug)).toEqual(["local", "exe-dev", "modal"]);
   expect(envs[0].kind).toBe(EnvKind.Local);
 
   // the offerings table: env × agent × model, is_default flags the pick
@@ -37,6 +37,7 @@ test("the whole lifecycle from JS", async () => {
   expect(offerings.filter((o: any) => o.isDefault).map((o: any) => o.envSlug)).toEqual([
     "local",
     "exe-dev",
+    "modal",
   ]);
 
   // per-env capabilities: one row per (env, capability) the catalog advertises

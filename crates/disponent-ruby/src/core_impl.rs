@@ -48,7 +48,7 @@ wire_enum!(SessionState {
     Cancelled => "cancelled", Lost => "lost",
 });
 wire_enum!(EnvKind {
-    Local => "local", ExeDev => "exe_dev",
+    Local => "local", ExeDev => "exe_dev", Modal => "modal",
     ClaudeCodeWeb => "claude_code_web", Custom => "custom",
 });
 wire_enum!(ExitReason {

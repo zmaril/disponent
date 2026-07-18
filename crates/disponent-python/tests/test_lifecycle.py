@@ -18,7 +18,7 @@ def test_whole_lifecycle():
     d = Disponent(sink="none")
 
     envs = d.environments()
-    assert [e.slug for e in envs] == ["local", "exe-dev"]
+    assert [e.slug for e in envs] == ["local", "exe-dev", "modal"]
     assert envs[0].kind == EnvKind.Local
 
     # per-env capabilities: one row per (env, capability) the catalog advertises

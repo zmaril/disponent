@@ -27,6 +27,13 @@
 //! they're unit-tested without touching the network; only the thin spawn
 //! wrappers go untested. `dry_run` fabricates every result — the engine-level
 //! tests run on it.
+//!
+//! straitjacket-allow-file:duplication — the `modal` backend
+//! (`modal.rs`) mirrors this exe.dev backend faithfully by design (the same
+//! START/INTERACT/REAP shape, dry-run gating, and tmux bootstrap), the way the
+//! per-binding `core_impl` seams mirror each other; the near-identical blocks
+//! (`worker_bootstrap` ↔ `container_bootstrap`, the test `req` builder) are
+//! intentional parallels, not accidental copies.
 
 use std::process::Command;
 
