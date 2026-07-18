@@ -6,9 +6,22 @@
 //! `interrupt` stops the agent's work, `kill` ends the tmux session and keeps
 //! the work dir for inspection; REAP removes the work dir too. Survey lists the
 //! tmux sessions, so reconcile adopts local runs a previous disponent left behind.
+//!
+//! ## The holder path (M1, `notes/owning-the-terminal.md` §5/§9)
+//!
+//! Gated by `DISPONENT_LOCAL_HOLDER`, the local backend runs the agent under the
+//! first-party pty holder (`disponent hold`) instead of a `tmux` session. The
+//! clone/worktree/setup/runner machinery is **shared byte-for-byte** — only the
+//! final launch differs (a `disponent hold … -- <runner>` daemon instead of
+//! `tmux new-session … <runner>`), and [`compute`](LocalTmux::compute) hands
+//! back a [`HolderCompute`] (dial the socket for send/capture/observe/kill)
+//! instead of a [`LocalCompute`] (shell out to `tmux`). tmux stays the default;
+//! the flag only selects the alternative, so the tmux path is untouched.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use serde_json::json;
@@ -16,6 +29,7 @@ use serde_json::json;
 use crate::backend::{
     run_argv, shq, Compute, EnvProvider, Provision, StartRequest, TemplateHandle, TemplateSpec,
 };
+use crate::observe::{StreamChunk, TerminalStream};
 
 /// tmux session names for disponent workers: `dsp-<session uid>`.
 const SESSION_PREFIX: &str = "dsp-";
@@ -29,6 +43,10 @@ pub struct LocalTmux {
     /// The agent command line; the brief is appended as its final argument.
     agent_cmd: String,
     dry_run: bool,
+    /// Run the agent under the first-party pty holder instead of tmux
+    /// (`DISPONENT_LOCAL_HOLDER`, M1). Off by default — tmux stays the default
+    /// backend; the flag only selects the alternative launch + Compute surface.
+    holder: bool,
 }
 
 impl LocalTmux {
@@ -50,6 +68,10 @@ impl LocalTmux {
                 ),
             ),
             dry_run: std::env::var("DISPONENT_LOCAL_DRY_RUN").is_ok(),
+            // Any non-empty value opts in (design names `DISPONENT_LOCAL_HOLDER=dsp-hold`).
+            holder: std::env::var("DISPONENT_LOCAL_HOLDER")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false),
         }
     }
 
@@ -68,7 +90,83 @@ impl LocalTmux {
             root,
             agent_cmd: agent_cmd.to_string(),
             dry_run: false,
+            holder: false,
         }
+    }
+
+    /// A real, holder-backed backend sandboxed for tests: the M1 path with its
+    /// own root (holder sockets live under `<root>/sock`).
+    pub fn sandboxed_holder(root: PathBuf, agent_cmd: &str) -> Self {
+        LocalTmux {
+            socket: "disponent".to_string(),
+            root,
+            agent_cmd: agent_cmd.to_string(),
+            dry_run: false,
+            holder: true,
+        }
+    }
+
+    /// Whether the holder path is selected (`DISPONENT_LOCAL_HOLDER`).
+    pub fn uses_holder(&self) -> bool {
+        self.holder
+    }
+
+    /// Where per-session holder sockets live: `<root>/sock/<uid>.sock`. Kept
+    /// under the managed root so it's self-contained (reap/tests) and distinct
+    /// from the tmux socket namespace.
+    fn holder_dir(&self) -> PathBuf {
+        self.root.join("sock")
+    }
+
+    /// The holder-path handle: names the socket to dial + the work dir, and
+    /// marks `holder` so [`compute`](LocalTmux::compute) picks [`HolderCompute`].
+    fn holder_handle(&self, uid: &str) -> serde_json::Value {
+        json!({
+            "holder": true,
+            "holderSock": self.holder_dir().join(format!("{uid}.sock")),
+            "workDir": self.root.join(uid),
+        })
+    }
+
+    /// Launch the agent under `disponent hold` (daemonized, reparented to init)
+    /// instead of a tmux session — the M1 swap. Reuses the same `runner` the
+    /// tmux path built; only the launcher differs. The `disponent` binary is the
+    /// currently-running executable (honest error if it can't be located).
+    fn launch_holder(&self, uid: &str, runner: &Path) -> anyhow::Result<()> {
+        let exe =
+            std::env::current_exe().context("locate the disponent binary to launch the holder")?;
+        let sock_dir = self.holder_dir();
+        std::fs::create_dir_all(&sock_dir)
+            .with_context(|| format!("mkdir {}", sock_dir.display()))?;
+        // `--daemonize` double-forks: the process we spawn exits 0 immediately
+        // and the reparented grandchild holds the pty. Null stdio so `status()`
+        // doesn't block on the daemon keeping the inherited pipe write-ends open.
+        let status = Command::new(&exe)
+            .arg("hold")
+            .arg(uid)
+            .arg("--daemonize")
+            .arg("--socket-dir")
+            .arg(&sock_dir)
+            .arg("--")
+            .arg(runner)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| anyhow!("launch holder ({}): {e}", exe.display()))?;
+        if !status.success() {
+            bail!("`disponent hold {uid}` exited {status}");
+        }
+        // The daemon binds its socket asynchronously; wait (bounded) for it so
+        // the engine can dial immediately after START returns.
+        let sock = sock_dir.join(format!("{uid}.sock"));
+        for _ in 0..250 {
+            if sock.exists() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        bail!("holder socket {} never appeared", sock.display())
     }
 
     fn tmux(&self, args: &[&str]) -> anyhow::Result<String> {
@@ -142,7 +240,13 @@ impl EnvProvider for LocalTmux {
     }
 
     fn start(&self, req: &StartRequest) -> anyhow::Result<Provision> {
-        let handle = self.handle(&req.session_uid);
+        // The handle shape follows the selected launcher: a holder handle names
+        // the socket to dial, a tmux handle names the session.
+        let handle = if self.holder {
+            self.holder_handle(&req.session_uid)
+        } else {
+            self.handle(&req.session_uid)
+        };
         if self.dry_run {
             return Ok(Provision { handle, url: None });
         }
@@ -234,21 +338,36 @@ impl EnvProvider for LocalTmux {
             "runner",
         )?;
 
-        self.tmux(&[
-            "new-session",
-            "-d",
-            "-s",
-            &Self::session_name(&req.session_uid),
-            "-x",
-            "220",
-            "-y",
-            "50",
-            &runner.display().to_string(),
-        ])?;
+        // The only step that differs between the tmux and holder paths: same
+        // runner, different holder of the pty. tmux stays the default.
+        if self.holder {
+            self.launch_holder(&req.session_uid, &runner)?;
+        } else {
+            self.tmux(&[
+                "new-session",
+                "-d",
+                "-s",
+                &Self::session_name(&req.session_uid),
+                "-x",
+                "220",
+                "-y",
+                "50",
+                &runner.display().to_string(),
+            ])?;
+        }
         Ok(Provision { handle, url: None })
     }
 
     fn compute(&self, handle: &serde_json::Value) -> anyhow::Result<Box<dyn Compute>> {
+        // Key off the handle, not `self.holder`: a session provisioned under one
+        // launcher is always driven by the matching Compute, even if the flag
+        // flipped since (reconcile-adopted sessions carry their own handle).
+        if handle.get("holder").and_then(|v| v.as_bool()) == Some(true) {
+            return Ok(Box::new(HolderCompute {
+                dev: self.clone(),
+                handle: handle.clone(),
+            }));
+        }
         Ok(Box::new(LocalCompute {
             dev: self.clone(),
             handle: handle.clone(),
@@ -346,6 +465,22 @@ impl EnvProvider for LocalTmux {
         if self.dry_run {
             return Ok(vec![]);
         }
+        // Holder path: the resident holders are the `<uid>.sock` files in the
+        // socket dir — scan it the way the tmux path scrapes `tmux ls`. A missing
+        // dir means nothing running (not an error).
+        if self.holder {
+            let Ok(entries) = std::fs::read_dir(self.holder_dir()) else {
+                return Ok(vec![]);
+            };
+            return Ok(entries
+                .filter_map(|e| {
+                    let name = e.ok()?.file_name();
+                    let uid = name.to_str()?.strip_suffix(".sock")?.to_string();
+                    let handle = self.holder_handle(&uid);
+                    Some((uid, handle))
+                })
+                .collect());
+        }
         // No tmux server on this socket = nothing running (not an error).
         let Ok(listing) = self.tmux(&["list-sessions", "-F", "#S"]) else {
             return Ok(vec![]);
@@ -356,6 +491,32 @@ impl EnvProvider for LocalTmux {
             .map(|uid| (uid.to_string(), self.handle(uid)))
             .collect())
     }
+}
+
+/// The agent's working directory (`<workDir>/task`) from a session handle — the
+/// shared task-dir resolution for one-shot `run`, used by both the tmux and
+/// holder backends.
+fn task_dir(handle: &serde_json::Value) -> anyhow::Result<PathBuf> {
+    handle
+        .get("workDir")
+        .and_then(|d| d.as_str())
+        .map(|d| PathBuf::from(d).join("task"))
+        .ok_or_else(|| anyhow!("handle has no 'workDir': {}", handle))
+}
+
+/// Run a one-shot `bash -c <cmd>` in `task` (the agent's working directory),
+/// returning trimmed stdout — the shared `run` mechanism for both backends.
+fn run_oneshot(task: &Path, cmd: &str) -> anyhow::Result<String> {
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(task)
+        .output()
+        .map_err(|e| anyhow!("run: spawn bash: {e}"))?;
+    if !out.status.success() {
+        bail!("run: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The INTERACT surface for one local worker: a clone of the backend config
@@ -392,27 +553,13 @@ impl Compute for LocalCompute {
             return Ok(String::new());
         }
         // One-shot in the session's task dir (the agent's working directory).
-        let task = self
-            .handle
-            .get("workDir")
-            .and_then(|d| d.as_str())
-            .map(|d| PathBuf::from(d).join("task"))
-            .ok_or_else(|| anyhow!("handle has no 'workDir': {}", self.handle))?;
-        let out = Command::new("bash")
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(&task)
-            .output()
-            .map_err(|e| anyhow!("run: spawn bash: {e}"))?;
-        if !out.status.success() {
-            bail!("run: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let task = task_dir(&self.handle)?;
+        run_oneshot(&task, cmd)
     }
 
     fn spawn(&self, cmd: &str) -> anyhow::Result<()> {
         // Launch the agent as a foreground process in the pane's shell.
-        self.send_line(cmd)
+        self.send_line(cmd) // straitjacket-allow:duplication — parallel Compute trait impls; transport differs, boilerplate intentionally mirrors HolderCompute
     }
 
     fn send(&self, input: &str) -> anyhow::Result<()> {
@@ -451,6 +598,177 @@ impl Compute for LocalCompute {
             return Ok(None);
         };
         Ok(Some(format!("vscode://file{work_dir}/task")))
+    }
+}
+
+/// The INTERACT surface for a holder-backed local worker (M1): dial the pty
+/// holder's socket for each verb. The agent runs under `disponent hold`, so
+/// `send`/`spawn` write `Input` frames, `capture` renders the byte-exact ring,
+/// `observe_stream` is the live exact channel, `interrupt` is `C-c` (`0x03`),
+/// and `kill` is a `Signal` control frame — no `tmux` on this path.
+struct HolderCompute {
+    dev: LocalTmux,
+    handle: serde_json::Value,
+}
+
+impl HolderCompute {
+    fn sock(&self) -> anyhow::Result<PathBuf> {
+        self.handle["holderSock"]
+            .as_str()
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("handle has no 'holderSock': {}", self.handle))
+    }
+
+    fn connect(&self) -> anyhow::Result<disponent_hold::Client> {
+        disponent_hold::Client::connect(&self.sock()?)
+    }
+
+    /// The agent's working directory (`<workDir>/task`), for one-shot `run`.
+    fn task_dir(&self) -> anyhow::Result<PathBuf> {
+        task_dir(&self.handle)
+    }
+
+    /// Write a line to the held shell + newline — the holder analogue of tmux
+    /// `send-keys -l <line> Enter`, the shared mechanism for spawning the agent
+    /// and relaying supervisor input.
+    fn send_line(&self, line: &str) -> anyhow::Result<()> {
+        if self.dev.dry_run {
+            return Ok(());
+        }
+        let mut bytes = line.as_bytes().to_vec();
+        bytes.push(b'\n');
+        self.connect()?.send_input(&bytes)
+    }
+}
+
+impl Compute for HolderCompute {
+    fn run(&self, cmd: &str) -> anyhow::Result<String> {
+        if self.dev.dry_run {
+            return Ok(String::new());
+        }
+        // One-shot in the session's task dir — independent of the held pty,
+        // exactly as the tmux path's `run` shells out to bash.
+        let task = self.task_dir()?;
+        run_oneshot(&task, cmd)
+    }
+
+    fn spawn(&self, cmd: &str) -> anyhow::Result<()> {
+        // Type the composed agent command into the held shell (the holder execs
+        // the runner's `bash`), mirroring the tmux path.
+        self.send_line(cmd)
+    }
+
+    fn send(&self, input: &str) -> anyhow::Result<()> {
+        self.send_line(input)
+    }
+
+    fn capture(&self) -> anyhow::Result<String> {
+        if self.dev.dry_run {
+            return Ok(String::new());
+        }
+        // The holder replays its ring as `Data` frames on connect; read until
+        // the stream goes quiet (a short read timeout) — that drained ring is
+        // the current byte-exact snapshot, the scraped-shaped back-compat view.
+        let mut c = self.connect()?;
+        c.set_read_timeout(Some(Duration::from_millis(150)))?;
+        let mut acc: Vec<u8> = Vec::new();
+        loop {
+            match c.read_frame() {
+                Ok(Some(disponent_hold::ServerFrame::Data(d))) => acc.extend_from_slice(&d),
+                Ok(Some(disponent_hold::ServerFrame::Heartbeat)) => {}
+                Ok(Some(disponent_hold::ServerFrame::Exit(_))) | Ok(None) => break,
+                Err(e) => {
+                    // A read timeout (WouldBlock/TimedOut) is "ring drained" — the
+                    // normal end of a snapshot, not a fault.
+                    if let Some(io) = e.downcast_ref::<std::io::Error>() {
+                        use std::io::ErrorKind::{TimedOut, WouldBlock};
+                        if matches!(io.kind(), WouldBlock | TimedOut) {
+                            break;
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(String::from_utf8_lossy(&acc).into_owned())
+    }
+
+    fn observe_stream(&self) -> anyhow::Result<Option<TerminalStream>> {
+        if self.dev.dry_run {
+            return Ok(None);
+        }
+        // A dedicated reader connection forwards holder frames onto a channel;
+        // the stream drops → the sender drops → the reader exits on the next
+        // frame (heartbeats bound the wait to ~5s even on an idle session).
+        let client = self.connect()?;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || holder_stream_reader(client, tx));
+        Ok(Some(TerminalStream::new(rx)))
+    }
+
+    fn observes_exact(&self) -> bool {
+        // The holder reads the pty byte-exact — this surface is the exact tier.
+        true
+    }
+
+    fn interrupt(&self) -> anyhow::Result<()> {
+        if self.dev.dry_run {
+            return Ok(());
+        }
+        // C-c (0x03) on the pty; the held shell survives, the work dir untouched.
+        self.connect()?.interrupt()
+    }
+
+    fn kill(&self) -> anyhow::Result<()> {
+        if self.dev.dry_run {
+            return Ok(());
+        }
+        // SIGKILL the child's process group via the holder control frame — the
+        // holder itself lingers until reaped (design §5), same as a tmux pane's
+        // shell surviving `kill-session`'s target process.
+        self.connect()?.kill()
+    }
+
+    fn workspace_link(&self) -> anyhow::Result<Option<String>> {
+        let Some(work_dir) = self.handle["workDir"].as_str() else {
+            return Ok(None);
+        };
+        Ok(Some(format!("vscode://file{work_dir}/task")))
+    }
+}
+
+/// Drain a holder connection's server frames onto a [`StreamChunk`] channel
+/// until the child exits or the consumer goes away.
+fn holder_stream_reader(mut client: disponent_hold::Client, tx: mpsc::Sender<StreamChunk>) {
+    loop {
+        match client.read_frame() {
+            Ok(Some(disponent_hold::ServerFrame::Data(d))) => {
+                if tx.send(StreamChunk::Data(d)).is_err() {
+                    break;
+                }
+            }
+            Ok(Some(disponent_hold::ServerFrame::Heartbeat)) => {
+                // Forward as liveness so a dropped receiver is noticed promptly.
+                if tx.send(StreamChunk::Heartbeat).is_err() {
+                    break;
+                }
+            }
+            Ok(Some(disponent_hold::ServerFrame::Exit(e))) => {
+                let chunk = match e {
+                    disponent_hold::Exit::Code(c) => StreamChunk::Exit {
+                        code: Some(c),
+                        signal: None,
+                    },
+                    disponent_hold::Exit::Signal(s) => StreamChunk::Exit {
+                        code: None,
+                        signal: Some(s),
+                    },
+                };
+                let _ = tx.send(chunk);
+                break;
+            }
+            Ok(None) | Err(_) => break,
+        }
     }
 }
 
@@ -496,5 +814,219 @@ mod tests {
             b.launch_spec(&req).unwrap().command(),
             "myagent --flag \"$(cat ../brief.md)\""
         );
+    }
+
+    // ── M1 holder path ──────────────────────────────────────────────────────
+    //
+    // These drive a real `disponent_hold::Holder` (over `/bin/sh`, no spawned
+    // `disponent` binary) through the `HolderCompute` surface, asserting the two
+    // headline wins (exact frames + a real exit code) and the send/interrupt/kill
+    // channel — plus a flag-OFF regression guard that today's scraped tmux path
+    // is untouched.
+
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Instant;
+
+    use crate::observe::Observation;
+    use disponent_hold::{Config, Holder};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn scratch_dir() -> PathBuf {
+        // Unique per call: pid keeps it distinct across test binaries, the atomic
+        // counter across calls within one. (Deliberately terser than
+        // disponent-hold's roundtrip `scratch_dir` — no shared cross-crate
+        // test-util is worth the plumbing for a two-line scaffold.)
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("dsp-m1-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Start a holder over `/bin/sh -c <script>`, socket in `dir` (bound
+    /// synchronously by `Holder::start`).
+    fn start_holder(uid: &str, script: &str, dir: &Path) -> Holder {
+        let mut env = BTreeMap::new();
+        env.insert("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into());
+        env.insert("TERM".into(), "xterm-256color".into());
+        Holder::start(Config {
+            uid: uid.to_string(),
+            argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            cwd: None,
+            env,
+            socket_dir: Some(dir.to_path_buf()),
+            ring_bytes: 256 * 1024,
+            size: Default::default(),
+        })
+        .unwrap()
+    }
+
+    /// A `HolderCompute` dialing a test holder's socket in `dir`.
+    fn holder_compute(dir: &Path, uid: &str) -> HolderCompute {
+        HolderCompute {
+            dev: LocalTmux::sandboxed_holder(dir.to_path_buf(), "agent"),
+            handle: json!({
+                "holder": true,
+                "holderSock": dir.join(format!("{uid}.sock")),
+                "workDir": dir.join(uid),
+            }),
+        }
+    }
+
+    /// Poll `drain_observations` until `f` says done or the deadline passes.
+    fn drive<F: FnMut(&Observation) -> bool>(stream: &TerminalStream, secs: u64, mut f: F) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            for o in stream.drain_observations() {
+                if f(&o) {
+                    return true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn holder_observe_stream_is_exact_and_carries_output() {
+        let dir = scratch_dir();
+        let holder = start_holder("obs", r#"printf 'exact-hello\n'; sleep 0.3; exit 0"#, &dir);
+        let c = holder_compute(&dir, "obs");
+        assert!(c.observes_exact(), "the holder surface is the exact tier");
+
+        let stream = c
+            .observe_stream()
+            .unwrap()
+            .expect("a holder provides a live stream");
+        let mut data = String::new();
+        let saw_it = drive(&stream, 5, |o| {
+            if o.kind == "raw" {
+                // The whole point of the holder path: exact, not scraped.
+                assert_eq!(o.fidelity, "exact", "holder frames are exact");
+                data.push_str(o.payload["payload"]["data"].as_str().unwrap_or(""));
+            }
+            data.contains("exact-hello")
+        });
+        assert!(
+            saw_it,
+            "the exact stream must carry the child's output, got {data:?}"
+        );
+        drop(holder);
+    }
+
+    #[test]
+    fn holder_stream_surfaces_the_real_exit_code() {
+        let dir = scratch_dir();
+        let holder = start_holder("exit3", r#"exit 3"#, &dir);
+        let c = holder_compute(&dir, "exit3");
+        let stream = c.observe_stream().unwrap().unwrap();
+
+        let mut code = None;
+        let got = drive(&stream, 5, |o| {
+            if o.kind == "exit" {
+                assert_eq!(o.fidelity, "exact");
+                code = o.payload["payload"]["code"].as_i64();
+                return true;
+            }
+            false
+        });
+        assert!(got, "the holder must surface the child's exit");
+        assert_eq!(code, Some(3), "the REAL exit code, not an inference");
+        drop(holder);
+    }
+
+    #[test]
+    fn without_the_flag_the_local_surface_is_scraped_and_not_streaming() {
+        // Flag OFF → LocalCompute: no exact stream, scraped tier. The regression
+        // guard that today's tmux path is byte-for-byte unchanged.
+        let b = LocalTmux::sandboxed("s", PathBuf::from("/tmp/x"), "agent");
+        assert!(!b.uses_holder());
+        let handle = json!({"tmux": "dsp-u", "socket": "s", "workDir": "/tmp/x/u"});
+        let c = b.compute(&handle).unwrap();
+        assert!(
+            !c.observes_exact(),
+            "the tmux surface is scraped, not exact"
+        );
+        assert!(
+            c.observe_stream().unwrap().is_none(),
+            "no exact stream without the holder"
+        );
+    }
+
+    #[test]
+    fn a_holder_handle_selects_the_holder_surface() {
+        let dir = scratch_dir();
+        let holder = start_holder("sel", r#"sleep 2; exit 0"#, &dir);
+        let b = LocalTmux::sandboxed_holder(dir.clone(), "agent");
+        assert!(b.uses_holder());
+        let handle = json!({
+            "holder": true,
+            "holderSock": dir.join("sel.sock"),
+            "workDir": dir.join("sel"),
+        });
+        let c = b.compute(&handle).unwrap();
+        assert!(
+            c.observes_exact(),
+            "a holder handle → the exact holder surface"
+        );
+        assert!(c.observe_stream().unwrap().is_some());
+        drop(holder);
+    }
+
+    #[test]
+    fn holder_send_reaches_the_child_and_interrupt_delivers_ctrl_c() {
+        let dir = scratch_dir();
+        // Echo a line read from stdin, then trap SIGINT to prove C-c landed.
+        let holder = start_holder(
+            "io",
+            r#"read x; echo "got:$x"; trap 'echo INTERRUPTED; exit 0' INT; sleep 5"#,
+            &dir,
+        );
+        let c = holder_compute(&dir, "io");
+        let stream = c.observe_stream().unwrap().unwrap();
+
+        c.send("world").unwrap(); // send_line → "world\n" over an Input frame
+        let mut acc = String::new();
+        let mut sent_int = false;
+        let done = drive(&stream, 8, |o| {
+            if o.kind == "raw" {
+                acc.push_str(o.payload["payload"]["data"].as_str().unwrap_or(""));
+            }
+            // Once the child echoed our input, fire the interrupt.
+            if acc.contains("got:world") && !sent_int {
+                c.interrupt().unwrap();
+                sent_int = true;
+            }
+            acc.contains("INTERRUPTED")
+        });
+        assert!(
+            sent_int,
+            "send() must reach the child's stdin (got {acc:?})"
+        );
+        assert!(done, "interrupt() must deliver C-c / SIGINT (got {acc:?})");
+        drop(holder);
+    }
+
+    #[test]
+    fn holder_kill_signals_the_child_via_the_control_frame() {
+        let dir = scratch_dir();
+        let holder = start_holder("kill", r#"sleep 30"#, &dir);
+        let c = holder_compute(&dir, "kill");
+        let stream = c.observe_stream().unwrap().unwrap();
+
+        c.kill().unwrap(); // SIGKILL to the child pgroup via the Signal frame
+        let mut signal = None;
+        let got = drive(&stream, 5, |o| {
+            if o.kind == "exit" {
+                signal = o.payload["payload"]["signal"].as_i64();
+                return true;
+            }
+            false
+        });
+        assert!(got, "kill must end the child and surface its exit");
+        assert_eq!(signal, Some(9), "SIGKILL death → signal 9");
+        drop(holder);
     }
 }

@@ -18,7 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 
 use crate::protocol::{
-    encode_client, encode_resize, read_handshake, read_server_frame, ClientKind, Exit, ServerFrame,
+    encode_client, encode_resize, encode_signal, read_handshake, read_server_frame, ClientKind,
+    Exit, ServerFrame,
 };
 use crate::server::socket_path;
 
@@ -68,6 +69,32 @@ impl Client {
         self.stream
             .write_all(&encode_client(ClientKind::Detach, &[]))?;
         self.stream.flush()?;
+        Ok(())
+    }
+
+    /// Deliver signal `sig` to the held child's process group (M1) — the
+    /// control-frame stop the engine's `kill`/`stop_exec` rides.
+    pub fn send_signal(&mut self, sig: i32) -> Result<()> {
+        self.stream.write_all(&encode_signal(sig))?;
+        self.stream.flush()?;
+        Ok(())
+    }
+
+    /// Kill the held child (SIGKILL to its process group).
+    pub fn kill(&mut self) -> Result<()> {
+        self.send_signal(libc::SIGKILL)
+    }
+
+    /// Interrupt the held child (`C-c`) — the byte `0x03` on the pty, exactly
+    /// what a terminal sends; the child's shell returns to a prompt.
+    pub fn interrupt(&mut self) -> Result<()> {
+        self.send_input(&[0x03])
+    }
+
+    /// Bound reads with a timeout so a snapshot read (drain the ring, then
+    /// stop) doesn't block forever waiting for the next live frame.
+    pub fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> Result<()> {
+        self.stream.set_read_timeout(dur)?;
         Ok(())
     }
 

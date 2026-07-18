@@ -28,6 +28,13 @@
 //! | 0    | `Data` — raw pty bytes         | `Input` — raw bytes → pty master |
 //! | 1    | `Heartbeat` — empty, periodic  | `Resize` — 2×u16 LE cols,rows   |
 //! | 2    | `Exit` — child exit (below)    | `Detach` — client is leaving    |
+//! | 3    | —                              | `Signal` — i32 LE signal → child |
+//!
+//! `Signal` (M1) delivers a real signal to the held child's process group — the
+//! control frame `kill`/`stop_exec` rides so the engine can end a held agent
+//! without a shell to type `C-c` into. Interrupt (`C-c`) still rides an `Input`
+//! frame; `Signal` is the harder stop (SIGKILL/SIGTERM), additive to the M0
+//! vocabulary.
 //!
 //! ## Exit payload
 //!
@@ -70,6 +77,9 @@ pub enum ClientKind {
     Resize = 1,
     /// The client is detaching (closing its end).
     Detach = 2,
+    /// Deliver a real signal to the child's process group: payload is
+    /// `signal: i32 LE` (M1 — the control frame `kill` rides).
+    Signal = 3,
 }
 
 impl ClientKind {
@@ -78,6 +88,7 @@ impl ClientKind {
             0 => Some(ClientKind::Input),
             1 => Some(ClientKind::Resize),
             2 => Some(ClientKind::Detach),
+            3 => Some(ClientKind::Signal),
             _ => None,
         }
     }
@@ -173,6 +184,11 @@ pub fn encode_resize(cols: u16, rows: u16) -> Vec<u8> {
     encode_client(ClientKind::Resize, &p)
 }
 
+/// Encode a `Signal` client frame from a signal number.
+pub fn encode_signal(sig: i32) -> Vec<u8> {
+    encode_client(ClientKind::Signal, &sig.to_le_bytes())
+}
+
 /// One decoded server frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerFrame {
@@ -185,8 +201,13 @@ pub enum ServerFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientFrame {
     Input(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Detach,
+    /// Deliver signal `sig` to the held child's process group.
+    Signal(i32),
 }
 
 /// Read the `{"v":N}` handshake line from a stream, returning the version.
@@ -294,6 +315,17 @@ pub fn read_client_frame<R: Read>(r: &mut R) -> io::Result<Option<ClientFrame>> 
             }
         }
         ClientKind::Detach => ClientFrame::Detach,
+        ClientKind::Signal => {
+            if payload.len() != 4 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "signal payload must be 4 bytes",
+                ));
+            }
+            ClientFrame::Signal(i32::from_le_bytes([
+                payload[0], payload[1], payload[2], payload[3],
+            ]))
+        }
     }))
 }
 
@@ -363,6 +395,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&encode_client(ClientKind::Input, b"world\n"));
         buf.extend_from_slice(&encode_resize(80, 24));
+        buf.extend_from_slice(&encode_signal(9));
         buf.extend_from_slice(&encode_client(ClientKind::Detach, b""));
         let mut c = Cursor::new(buf);
         assert_eq!(
@@ -372,6 +405,10 @@ mod tests {
         assert_eq!(
             read_client_frame(&mut c).unwrap(),
             Some(ClientFrame::Resize { cols: 80, rows: 24 })
+        );
+        assert_eq!(
+            read_client_frame(&mut c).unwrap(),
+            Some(ClientFrame::Signal(9))
         );
         assert_eq!(
             read_client_frame(&mut c).unwrap(),

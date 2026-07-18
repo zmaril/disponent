@@ -18,3 +18,7 @@ uuid = { workspace = true }
 fluessig = { git = "https://github.com/zmaril/fluessig", rev = "5c65e8f70245fa1940ac9071cfc12916e149a9d3" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tiny_http = { workspace = true }
+# The M1 local-holder path (DISPONENT_LOCAL_HOLDER): the local backend can run
+# the agent under the first-party pty holder instead of tmux, dialing its socket
+# for send/capture/observe/kill. hold pulls only anyhow + libc, so no cycle.
+disponent-hold = { path = "../disponent-hold" }
