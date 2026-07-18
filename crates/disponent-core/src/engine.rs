@@ -10,12 +10,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 use chrono::{SecondsFormat, Utc};
 use fluessig::data::{Mutation, Transaction};
-use fluessig::observe::{Event as ObsEvent, ObserverPool, Poll};
+use fluessig::observe::ObserverPool;
 use fluessig::sql::Dialect;
 use serde_json::json;
 use uuid::Uuid;
@@ -23,7 +23,6 @@ use uuid::Uuid;
 use crate::agent::{AgentAdapter, ClaudeCode};
 use crate::backend::{EnvProvider, ExeDev, StartRequest};
 use crate::catalog::{self, upsert};
-use crate::detectors::Detectors;
 use crate::local::LocalTmux;
 use crate::mcp_generated::{
     DispatchSpec, DriverPlanOptions, EnvCapability, Environment, Event, EventOptions, Message,
@@ -31,10 +30,11 @@ use crate::mcp_generated::{
     WorkspaceLink,
 };
 use crate::modal::Modal;
-use crate::observe::{self, Observation};
+use crate::observe::Observation;
 use crate::schema_gen::{TableSchema, DUCKDB_TABLES, PG_TABLES, SQLITE_TABLES};
 use crate::sink::Sink;
 use crate::status::{legal_transition, TERMINAL};
+use watch::{collect, watch_session};
 
 /// Page size for the stream cursors when the caller doesn't pass `limit`.
 const DEFAULT_PAGE: usize = 100;
@@ -401,95 +401,8 @@ impl Drop for Engine {
     }
 }
 
-/// One session's terminal watcher joins the pool (the provisioner and
-/// reconcile-adoption call this off the Engine).
-fn watch_session(
-    observers: &ObserverPool<Observation>,
-    interval: Duration,
-    backend: Arc<dyn EnvProvider>,
-    adapter: Arc<dyn AgentAdapter>,
-    uid: &str,
-    handle: serde_json::Value,
-    // #28: the single resolved policy, read here for #25's detector thresholds
-    // (idle_secs, first_token_secs). Detection only — no enforcement.
-    policy: LifecyclePolicy,
-) {
-    let mut last = String::new();
-    // #25: per-session terminal-condition detectors, thresholds from the one
-    // resolved LifecyclePolicy. Pure state machines fed the real clock + an
-    // activity bit each poll; they REPORT candidate exits, they never reap.
-    let mut detectors = Detectors::new(policy.idle_secs, policy.first_token_secs);
-    observers.spawn(uid.to_string(), interval, move || {
-        // The agent's state read goes through the adapter's `monitor` (which
-        // wraps the compute-surface capture at scraped fidelity).
-        let pane = backend
-            .compute(&handle)
-            .and_then(|c| Ok(adapter.monitor(&*c)?.pane))
-            .map_err(|e| e.to_string())?;
-        let delta = observe::terminal_delta(&last, &pane);
-        last = pane;
-        // Activity = the pane changed this poll. Feed (real clock, activity) to
-        // the detectors; any fired condition rides the same observation pipeline
-        // as the scraped delta, landing as a derived event. Idle resets on
-        // activity; dead-stream latches on the first token.
-        let activity = delta.is_some();
-        let mut items: Vec<Observation> = delta
-            .map(observe::terminal_observation)
-            .into_iter()
-            .collect();
-        for condition in detectors.observe(Instant::now(), activity) {
-            items.push(condition.observation());
-        }
-        Ok(Poll::Items(items))
-    });
-}
-
-/// The collector: fold drained observations into the ledger until stopped.
-/// Observer failures become log events — a watcher dying is a fact about the
-/// session, not a silent gap.
-fn collect(
-    ledger: Arc<Mutex<Ledger>>,
-    observers: Arc<ObserverPool<Observation>>,
-    stop: Arc<AtomicBool>,
-) {
-    while !stop.load(Ordering::Relaxed) {
-        let drained = observers.drain();
-        if !drained.is_empty() {
-            let mut l = ledger.lock().unwrap();
-            let mut mutations = Vec::new();
-            for ev in drained {
-                match ev {
-                    ObsEvent::Item { subject, item } => {
-                        if l.sessions
-                            .iter()
-                            .any(|s| s.uid == subject && s.reaped_at.is_none())
-                        {
-                            let e = l.push_event_graded(
-                                &subject,
-                                &item.kind,
-                                &item.fidelity,
-                                item.payload,
-                            );
-                            mutations.push(event_mutation(&e));
-                        }
-                    }
-                    ObsEvent::Failed { subject, error } => {
-                        let e = l.push_event(
-                            &subject,
-                            "log",
-                            json!({"kind": "log", "payload":
-                                {"line": format!("terminal observer stopped: {error}")}}),
-                        );
-                        mutations.push(event_mutation(&e));
-                    }
-                    ObsEvent::Ended { .. } => {}
-                }
-            }
-            let _ = l.mirror(mutations);
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
+// The terminal-watcher subsystem (watch_session + collect, both tiers) lives in
+// `watch.rs` — see `mod watch` below — to keep this file under the size budget.
 
 // ── ledger rows → sink mutations (columns follow the generated schema) ──
 
@@ -1494,6 +1407,7 @@ impl Default for DriverPlanOptions {
 }
 
 mod messaging;
+mod watch;
 
 #[cfg(test)]
 mod tests;
