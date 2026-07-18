@@ -608,6 +608,16 @@
           "nullable": true
         },
         {
+          "name": "attachTmuxSocket",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "attachTmuxSession",
+          "type": "string",
+          "nullable": true
+        },
+        {
           "name": "url",
           "type": "url",
           "nullable": true

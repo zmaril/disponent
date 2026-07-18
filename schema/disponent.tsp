@@ -241,6 +241,18 @@ model Session {
   /** The env's own handle(s): tmux session name, VM name, web session id/url. */
   envHandle?: Json;
 
+  /** The tmux server socket an external terminal can attach to when the env
+   * runs the agent in a reachable local multiplexer (the local tmux path);
+   * pairs with attachTmuxSession. Both null for web/ttyd-only envs (exe.dev)
+   * and for the local holder path, whose terminal is reached differently. Two
+   * flat scalars rather than a nested object, to sidestep a fluessig
+   * Magnus-emitter gap for nested returned structs. */
+  attachTmuxSocket?: string;
+
+  /** The tmux session name inside attachTmuxSocket (dsp-uid for local
+   * workers). Populated together with attachTmuxSocket, or not at all. */
+  attachTmuxSession?: string;
+
   /** Human-facing view URL when the env has one (ttyd, web session page). */
   url?: url;
 

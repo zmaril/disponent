@@ -428,6 +428,8 @@ fn session_mutation(s: &Session) -> Mutation {
             "dispatch_id",
             "state",
             "env_handle",
+            "attach_tmux_socket",
+            "attach_tmux_session",
             "url",
             "resumed_from",
             "started_at",
@@ -441,6 +443,8 @@ fn session_mutation(s: &Session) -> Mutation {
             json!(s.dispatch_id),
             json!(s.state),
             s.env_handle.clone().unwrap_or(serde_json::Value::Null),
+            json!(s.attach_tmux_socket),
+            json!(s.attach_tmux_session),
             json!(s.url),
             json!(s.resumed_from),
             json!(s.started_at),
@@ -681,6 +685,10 @@ fn provision_worker(
             let session = l.session_mut(&uid).expect("just transitioned to running");
             session.started_at = Some(now());
             session.env_handle = Some(p.handle.clone());
+            let (attach_tmux_socket, attach_tmux_session) =
+                crate::local::attach_tmux_from_handle(&p.handle);
+            session.attach_tmux_socket = attach_tmux_socket;
+            session.attach_tmux_session = attach_tmux_session;
             session.url = p.url.clone();
             let snapshot = session.clone();
             // The worker-up log also carries the resolved lifecycle policy (#28):
@@ -850,6 +858,8 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             dispatch_id: dispatch.id.clone(),
             state: "queued".to_string(),
             env_handle: None,
+            attach_tmux_socket: None,
+            attach_tmux_session: None,
             url: None,
             resumed_from: None,
             started_at: None,
@@ -1255,11 +1265,18 @@ impl crate::mcp_generated::DisponentMcp for Engine {
                     agent: "claude-code".to_string(),
                     model: None,
                 };
+                // A local tmux worker's session is directly attachable;
+                // reconstruct the (socket, session) pair from its surveyed
+                // handle. Holder / exe.dev handles lack the tmux shape → null.
+                let (attach_tmux_socket, attach_tmux_session) =
+                    crate::local::attach_tmux_from_handle(handle);
                 let session = Session {
                     uid: session_uid.clone(),
                     dispatch_id: dispatch.id.clone(),
                     state: "running".to_string(),
                     env_handle: Some(handle.clone()),
+                    attach_tmux_socket,
+                    attach_tmux_session,
                     url: None,
                     resumed_from: None,
                     started_at: None,

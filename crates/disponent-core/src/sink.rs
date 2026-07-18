@@ -150,8 +150,9 @@ impl Sink {
         restored.dispatches = rows.collect::<Result<_, _>>()?;
 
         let mut q = conn.prepare(
-            "SELECT uid, dispatch_id, state, env_handle, url, resumed_from, started_at, \
-             ended_at, exit_reason, exit_detail, reaped_at FROM sessions ORDER BY rowid",
+            "SELECT uid, dispatch_id, state, env_handle, attach_tmux_socket, \
+             attach_tmux_session, url, resumed_from, started_at, ended_at, \
+             exit_reason, exit_detail, reaped_at FROM sessions ORDER BY rowid",
         )?;
         let rows = q.query_map([], |r| {
             Ok(Session {
@@ -159,13 +160,15 @@ impl Sink {
                 dispatch_id: r.get(1)?,
                 state: r.get(2)?,
                 env_handle: jsonv(text(r, 3)),
-                url: r.get(4)?,
-                resumed_from: r.get(5)?,
-                started_at: r.get(6)?,
-                ended_at: r.get(7)?,
-                exit_reason: r.get(8)?,
-                exit_detail: r.get(9)?,
-                reaped_at: r.get(10)?,
+                attach_tmux_socket: r.get(4)?,
+                attach_tmux_session: r.get(5)?,
+                url: r.get(6)?,
+                resumed_from: r.get(7)?,
+                started_at: r.get(8)?,
+                ended_at: r.get(9)?,
+                exit_reason: r.get(10)?,
+                exit_detail: r.get(11)?,
+                reaped_at: r.get(12)?,
             })
         })?;
         restored.sessions = rows.collect::<Result<_, _>>()?;

@@ -931,6 +931,24 @@
           "doc": "The env's own handle(s): tmux session name, VM name, web session id/url."
         },
         {
+          "name": "attachTmuxSocket",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "The tmux server socket an external terminal can attach to when the env\nruns the agent in a reachable local multiplexer (the local tmux path);\npairs with attachTmuxSession. Both null for web/ttyd-only envs (exe.dev)\nand for the local holder path, whose terminal is reached differently. Two\nflat scalars rather than a nested object, to sidestep a fluessig\nMagnus-emitter gap for nested returned structs."
+        },
+        {
+          "name": "attachTmuxSession",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "The tmux session name inside attachTmuxSocket (dsp-uid for local\nworkers). Populated together with attachTmuxSocket, or not at all."
+        },
+        {
           "name": "url",
           "type": {
             "k": "scalar",

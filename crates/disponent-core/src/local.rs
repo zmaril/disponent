@@ -200,6 +200,23 @@ impl LocalTmux {
     }
 }
 
+/// The directly-attachable tmux target for a session, derived from its handle:
+/// the `(socket, session)` pair an external terminal reaches the agent with
+/// (`tmux -L <socket> attach -t <session>`). Populated only for the local tmux
+/// handle shape (`{ tmux, socket }`); the holder handle (`{ holder, holderSock }`)
+/// and exe.dev (`{ vmName, host }`) lack it, so this returns `(None, None)` for
+/// them — honest for envs whose terminal isn't a reachable local tmux.
+pub fn attach_tmux_from_handle(handle: &serde_json::Value) -> (Option<String>, Option<String>) {
+    // A holder session isn't a tmux session, even though it shares a workDir.
+    if handle.get("holder").and_then(|v| v.as_bool()) == Some(true) {
+        return (None, None);
+    }
+    match (handle["socket"].as_str(), handle["tmux"].as_str()) {
+        (Some(socket), Some(session)) => (Some(socket.to_string()), Some(session.to_string())),
+        _ => (None, None),
+    }
+}
+
 /// `owner/repo` is a gh slug; anything with a scheme, a colon, or an existing
 /// path is for `git clone` directly.
 fn is_gh_slug(repo: &str) -> bool {
@@ -885,6 +902,23 @@ mod tests {
         let h = b.handle("abc-123");
         assert_eq!(h["tmux"], "dsp-abc-123");
         assert!(h["workDir"].as_str().unwrap().ends_with("abc-123"));
+    }
+
+    #[test]
+    fn attach_tmux_from_handle_populates_only_the_tmux_path() {
+        // The tmux handle yields the correlated (socket, session) pair.
+        let tmux = LocalTmux::dry_run().handle("abc-123");
+        let (socket, session) = attach_tmux_from_handle(&tmux);
+        assert_eq!(socket.as_deref(), Some("disponent"));
+        assert_eq!(session.as_deref(), Some("dsp-abc-123"));
+
+        // The holder handle shares a workDir but is not a tmux session → null.
+        let holder = json!({ "holder": true, "holderSock": "/x.sock", "workDir": "/w" });
+        assert_eq!(attach_tmux_from_handle(&holder), (None, None));
+
+        // An exe.dev handle has no tmux shape → null.
+        let exe = json!({ "vmName": "vm", "host": "vm.exe.xyz" });
+        assert_eq!(attach_tmux_from_handle(&exe), (None, None));
     }
 
     // Run git in `dir`, panicking (with output) on failure. `-c user.*` keeps
