@@ -103,12 +103,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
-      - name: build the napi addon + test
+      - name: lint + format (biome), build the napi addon, test
         working-directory: crates/disponent-node
         run: |
           bun install
+          bun run check
           bun run build
-          bun run test
+          bun test --coverage
 
   python:
     name: python binding
@@ -123,14 +124,16 @@ jobs:
           python-version: "3.12"
       # deps live once in pyproject's [dependency-groups] (needs pip >= 25.1);
       # the dry-run backend flags are set by the test suite's conftest.
-      - name: build + test
+      - name: lint + format (ruff), build + test with coverage
         working-directory: crates/disponent-python
         run: |
           python -m venv .venv
           .venv/bin/pip install --quiet --upgrade pip
           .venv/bin/pip install --quiet --group dev
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
           .venv/bin/maturin develop --quiet
-          .venv/bin/python -m pytest tests/ -q
+          .venv/bin/python -m pytest tests/ -q --cov=disponent --cov-report=term-missing
 
   ruby:
     name: ruby binding
@@ -148,6 +151,9 @@ jobs:
           bundler-cache: true
       # rb_sys drives cargo through extconf/make; bindgen finds the runner's
       # libclang on its own (no LIBCLANG_PATH needed on ubuntu images).
+      - name: lint + format (standardrb)
+        working-directory: crates/disponent-ruby
+        run: bundle exec standardrb
       - name: build + test
         working-directory: crates/disponent-ruby
         env:

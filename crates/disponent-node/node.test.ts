@@ -26,15 +26,18 @@ test("the whole lifecycle from JS", async () => {
   const d = new Disponent({ sink: "none" });
 
   const envs = await d.environments();
-  expect(envs.map((e: any) => e.slug)).toEqual(["local", "exe-dev", "modal"]);
+  expect(envs.map((e) => e.slug)).toEqual(["local", "exe-dev", "modal"]);
   expect(envs[0].kind).toBe(EnvKind.Local);
 
   // the offerings table: env × agent × model, is_default flags the pick
   const offerings = await d.offerings();
-  expect(
-    offerings.map((o: any) => [o.envSlug, o.agentName, o.modelId, o.isDefault]),
-  ).toContainEqual(["local", "claude-code", "claude-opus-4-8", true]);
-  expect(offerings.filter((o: any) => o.isDefault).map((o: any) => o.envSlug)).toEqual([
+  expect(offerings.map((o) => [o.envSlug, o.agentName, o.modelId, o.isDefault])).toContainEqual([
+    "local",
+    "claude-code",
+    "claude-opus-4-8",
+    true,
+  ]);
+  expect(offerings.filter((o) => o.isDefault).map((o) => o.envSlug)).toEqual([
     "local",
     "exe-dev",
     "modal",
@@ -42,21 +45,15 @@ test("the whole lifecycle from JS", async () => {
 
   // per-env capabilities: one row per (env, capability) the catalog advertises
   const caps = await d.capabilities();
-  expect(
-    caps.some(
-      (c: any) => c.envSlug === "local" && c.capability === CapabilityKind.Dispatch,
-    ),
-  ).toBe(true);
+  expect(caps.some((c) => c.envSlug === "local" && c.capability === CapabilityKind.Dispatch)).toBe(
+    true,
+  );
   // exe-dev advertises VM isolation; local does not
   expect(
-    caps.some(
-      (c: any) => c.envSlug === "exe-dev" && c.capability === CapabilityKind.IsolationVm,
-    ),
+    caps.some((c) => c.envSlug === "exe-dev" && c.capability === CapabilityKind.IsolationVm),
   ).toBe(true);
   expect(
-    caps.some(
-      (c: any) => c.envSlug === "local" && c.capability === CapabilityKind.IsolationVm,
-    ),
+    caps.some((c) => c.envSlug === "local" && c.capability === CapabilityKind.IsolationVm),
   ).toBe(false);
 
   const session = await d.dispatch({
@@ -112,10 +109,6 @@ test("driverPlan drains to null: DDL first, then rows", async () => {
 
 test("bad inputs fail loudly at the seam", async () => {
   const d = new Disponent({ sink: "none" });
-  expect(d.dispatch({ brief: "x", env: "local", labels: "not json" })).rejects.toThrow(
-    "labels",
-  );
-  expect(() => new Disponent({ configPath: "/tmp/nope.toml" })).toThrow(
-    "configPath",
-  );
+  expect(d.dispatch({ brief: "x", env: "local", labels: "not json" })).rejects.toThrow("labels");
+  expect(() => new Disponent({ configPath: "/tmp/nope.toml" })).toThrow("configPath");
 });

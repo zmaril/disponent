@@ -24,4 +24,14 @@ module-name = "disponent._disponent"
 # Everything the test suite needs, declared ONCE (PEP 735). Install with
 # `uv pip install --group dev` (or pip >= 25.1). Runtime deps stay empty by
 # design — the engine is the compiled extension.
-dev = ["maturin>=1.7,<2.0", "pytest"]
+dev = ["maturin>=1.7,<2.0", "pytest", "pytest-cov", "ruff"]
+
+[tool.ruff]
+# Match the fleet's default style; the engine itself is Rust, so this only
+# governs the thin Python binding + its tests.
+line-length = 88
+
+[tool.ruff.lint]
+# Ruff's default rule set (pyflakes + a slice of pycodestyle) — deliberately
+# conservative for a hand-written binding surface.
+select = ["E", "F", "I"]

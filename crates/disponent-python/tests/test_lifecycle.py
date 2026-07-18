@@ -6,11 +6,11 @@ plus the two streams and the enum/JSON seams. Mirrors the node bun test.
     .venv/bin/maturin develop
     .venv/bin/python -m pytest tests/
 """
+
 import json
 
 import conftest  # noqa: F401  (imports for its env-var side effects)
 import pytest
-
 from disponent import CapabilityKind, Disponent, EnvKind, EventKind, SessionState
 
 

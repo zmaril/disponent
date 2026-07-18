@@ -6,6 +6,7 @@ environment (unlike Bun, which snapshots), so setting them here — at import,
 before any test builds a ``Disponent`` — is enough; no native ``set_env`` shim
 is needed.
 """
+
 import os
 
 os.environ.setdefault("DISPONENT_LOCAL_DRY_RUN", "1")

@@ -16,9 +16,11 @@
     "build": "napi build --platform --release --no-const-enum --runtime-string-enum",
     "build:debug": "napi build --platform --no-const-enum --runtime-string-enum",
     "gen": "bash ../../scripts/gen.sh",
+    "check": "biome check .",
     "test": "bun test"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
     "@napi-rs/cli": "^3.4.2"
   }
 }
