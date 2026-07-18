@@ -11,18 +11,17 @@
 //! stream, let a client declare a **role** — `reader` (default) or `writer` —
 //! and let the holder grant or deny the single writer lock:
 //!
-//! 1. **client → holder**: `{"v":2,"role":"writer"}\n` (or `"reader"`). The
-//!    role is the only field the holder reads; a missing/unknown role is the
-//!    safe read-only default.
-//! 2. **holder → client**: `{"v":2,"role":"writer","writer_busy":false}\n`. The
+//! 1. **client → holder**: `{"role":"writer"}\n` (or `"reader"`). The role is
+//!    the only field the holder reads; a missing/unknown role is the safe
+//!    read-only default.
+//! 2. **holder → client**: `{"role":"writer","writer_busy":false}\n`. The
 //!    `role` here is the one *actually granted* — a Writer request is admitted
 //!    as a `reader` with `writer_busy:true` when another writer already holds
 //!    the lock. At most ONE writer at a time; **N** readers.
 //!
-//! (JSON lines chosen over a bare version byte to match disponent's stdio-JSON
-//! idiom and to carry the role/grant without a wire break.) The handshake
-//! version bumped `1 → 2` with the role exchange; all consumers are in-repo and
-//! bumped together.
+//! (JSON lines chosen to match disponent's stdio-JSON idiom and to carry the
+//! role/grant without a wire break.) The handshake is unversioned: every
+//! consumer is in-repo, so the wire format changes in place.
 //!
 //! **Enforcement.** Only the writer's `Input`/`Resize` frames reach the pty; a
 //! reader's are ignored (its keystrokes are a no-op). `Signal` is a *control*
@@ -66,10 +65,6 @@ use std::io::{self, Read, Write};
 /// are split across successive `Data` frames.
 pub const MAX_PAYLOAD: usize = 16 * 1024;
 
-/// Protocol version carried in the handshake (bumped 1→2 with the role
-/// exchange, design §6).
-pub const VERSION: u32 = 2;
-
 /// The role a client requests, and that the holder grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -94,8 +89,6 @@ impl Role {
 /// The holder's handshake reply to a connecting client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HandshakeReply {
-    /// The protocol version the holder speaks.
-    pub version: u32,
     /// The role actually granted (a denied Writer is admitted as a Reader).
     pub role: Role,
     /// True iff the client asked for Writer but one was already held.
@@ -284,20 +277,6 @@ fn read_handshake_line<R: Read>(r: &mut R) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&line).into_owned())
 }
 
-/// Extract the integer value of `"<key>":N` from a handshake line. Deliberately
-/// tiny hand-parse — no serde in this crate.
-fn json_u32(line: &str, key: &str) -> Option<u32> {
-    let pat = format!("\"{key}\":");
-    line.split(&pat).nth(1).and_then(|rest| {
-        let digits: String = rest
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        digits.parse::<u32>().ok()
-    })
-}
-
 /// The role a handshake line declares; anything but an explicit `"writer"` is
 /// the safe read-only default.
 fn json_role(line: &str) -> Role {
@@ -316,7 +295,7 @@ fn json_flag(line: &str, key: &str) -> bool {
 /// Write the client's role-request line (client → holder) — the first bytes on
 /// the wire after connect, before any frame.
 pub fn write_role_request<W: Write>(w: &mut W, role: Role) -> io::Result<()> {
-    writeln!(w, "{{\"v\":{VERSION},\"role\":\"{}\"}}", role.as_wire())?;
+    writeln!(w, "{{\"role\":\"{}\"}}", role.as_wire())?;
     w.flush()
 }
 
@@ -326,12 +305,12 @@ pub fn read_role_request<R: Read>(r: &mut R) -> io::Result<Role> {
     Ok(json_role(&read_handshake_line(r)?))
 }
 
-/// Write the holder's handshake reply (holder → client): the version, the role
-/// actually granted, and whether a Writer request was denied as busy.
+/// Write the holder's handshake reply (holder → client): the role actually
+/// granted, and whether a Writer request was denied as busy.
 pub fn write_handshake_reply<W: Write>(w: &mut W, role: Role, writer_busy: bool) -> io::Result<()> {
     writeln!(
         w,
-        "{{\"v\":{VERSION},\"role\":\"{}\",\"writer_busy\":{writer_busy}}}",
+        "{{\"role\":\"{}\",\"writer_busy\":{writer_busy}}}",
         role.as_wire()
     )?;
     w.flush()
@@ -340,10 +319,7 @@ pub fn write_handshake_reply<W: Write>(w: &mut W, role: Role, writer_busy: bool)
 /// Read the holder's handshake reply (client side).
 pub fn read_handshake_reply<R: Read>(r: &mut R) -> io::Result<HandshakeReply> {
     let line = read_handshake_line(r)?;
-    let version = json_u32(&line, "v")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad handshake line"))?;
     Ok(HandshakeReply {
-        version,
         role: json_role(&line),
         writer_busy: json_flag(&line, "writer_busy"),
     })
@@ -470,7 +446,7 @@ mod tests {
         );
 
         // A line with no role field is admitted as a reader (safe default).
-        let mut c = Cursor::new(b"{\"v\":2}\n".to_vec());
+        let mut c = Cursor::new(b"{}\n".to_vec());
         assert_eq!(read_role_request(&mut c).unwrap(), Role::Reader);
     }
 
@@ -479,7 +455,6 @@ mod tests {
         let mut buf = Vec::new();
         write_handshake_reply(&mut buf, Role::Writer, false).unwrap();
         let reply = read_handshake_reply(&mut Cursor::new(buf)).unwrap();
-        assert_eq!(reply.version, VERSION);
         assert_eq!(reply.role, Role::Writer);
         assert!(!reply.writer_busy);
 
