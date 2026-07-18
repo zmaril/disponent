@@ -13,6 +13,7 @@ from ._disponent import (  # noqa: F401
     ExitReason,
     Fidelity,
     IsolationKind,
+    Party,
     SessionState,
 )
 
@@ -24,5 +25,6 @@ __all__ = [
     "ExitReason",
     "Fidelity",
     "IsolationKind",
+    "Party",
     "SessionState",
 ]

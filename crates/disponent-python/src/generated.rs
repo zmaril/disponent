@@ -104,6 +104,15 @@ pub enum EventKind {
     Usage,
     Artifact,
     Raw,
+    Mail,
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Copy, PartialEq)]
+pub enum Party {
+    Manager,
+    Worker,
+    User,
 }
 
 #[pyclass(eq, eq_int)]
@@ -263,6 +272,39 @@ impl RawObservation {
     }
 }
 
+/// Pointer + the fields a reader needs to triage a `mail` event without
+/// fetching the Message: direction (sender/recipient), the fan-out it belongs
+/// to, and its topic (so a reader can group by topic for latest-wins).
+#[pyclass(get_all)]
+#[derive(Clone)]
+pub struct MailRef {
+    pub message_id: String,
+    pub sender: Party,
+    pub recipient: Party,
+    pub fanout_id: String,
+    pub topic: Option<String>,
+}
+#[pymethods]
+impl MailRef {
+    #[new]
+    #[pyo3(signature = (message_id, sender, recipient, fanout_id, topic=None))]
+    fn new(
+        message_id: String,
+        sender: Party,
+        recipient: Party,
+        fanout_id: String,
+        topic: Option<String>,
+    ) -> Self {
+        Self {
+            message_id,
+            sender,
+            recipient,
+            fanout_id,
+            topic,
+        }
+    }
+}
+
 #[pyclass(get_all)]
 #[derive(Clone)]
 pub struct OpenOptions {
@@ -294,12 +336,13 @@ pub struct DispatchSpec {
     pub timeout_secs: Option<i32>,
     pub max_budget: Option<String>,
     pub unchecked: Option<bool>,
+    pub tags: Option<Vec<String>>,
     pub labels: Option<String>,
 }
 #[pymethods]
 impl DispatchSpec {
     #[new]
-    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, labels=None))]
+    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
     fn new(
         brief: String,
         env: String,
@@ -314,6 +357,7 @@ impl DispatchSpec {
         timeout_secs: Option<i32>,
         max_budget: Option<String>,
         unchecked: Option<bool>,
+        tags: Option<Vec<String>>,
         labels: Option<String>,
     ) -> Self {
         Self {
@@ -330,6 +374,7 @@ impl DispatchSpec {
             timeout_secs,
             max_budget,
             unchecked,
+            tags,
             labels,
         }
     }
@@ -403,6 +448,60 @@ impl EventOptions {
             session_uid,
             after_idx,
             kinds,
+        }
+    }
+}
+
+/// Where a Manager-sent message goes. A worker never fills this: the
+/// worker-role server defaults recipient = its Manager, anchored to the bound
+/// session (deferred to the MCP layer). A Manager sets exactly one destination.
+#[pyclass(get_all)]
+#[derive(Clone)]
+pub struct SendTarget {
+    pub tags: Option<Vec<String>>,
+    pub sessions: Option<Vec<String>>,
+    pub user: Option<String>,
+}
+#[pymethods]
+impl SendTarget {
+    #[new]
+    #[pyo3(signature = (tags=None, sessions=None, user=None))]
+    fn new(tags: Option<Vec<String>>, sessions: Option<Vec<String>>, user: Option<String>) -> Self {
+        Self {
+            tags,
+            sessions,
+            user,
+        }
+    }
+}
+
+/// Filter for the `messages` read. Absent fields don't constrain.
+#[pyclass(get_all)]
+#[derive(Clone)]
+pub struct MessagesFilter {
+    pub fanout_id: Option<String>,
+    pub recipient: Option<Party>,
+    pub session_uid: Option<String>,
+    pub topic: Option<String>,
+    pub latest_per_topic: Option<bool>,
+}
+#[pymethods]
+impl MessagesFilter {
+    #[new]
+    #[pyo3(signature = (fanout_id=None, recipient=None, session_uid=None, topic=None, latest_per_topic=None))]
+    fn new(
+        fanout_id: Option<String>,
+        recipient: Option<Party>,
+        session_uid: Option<String>,
+        topic: Option<String>,
+        latest_per_topic: Option<bool>,
+    ) -> Self {
+        Self {
+            fanout_id,
+            recipient,
+            session_uid,
+            topic,
+            latest_per_topic,
         }
     }
 }
@@ -640,6 +739,56 @@ impl Event {
     }
 }
 
+/// One message dropped in one inbox — the manager↔worker communication
+/// primitive (notes/manager-worker-comms.md). The Manager mints these addressed
+/// to a worker or the user; a worker mints them addressed (implicitly) to its
+/// Manager. Disponent owns these rows — no environment backs them, so reconcile
+/// skips them and durability is the SQLite mirror (design §11).
+#[pyclass(get_all)]
+#[derive(Clone)]
+pub struct Message {
+    pub id: String,
+    pub created_at: String,
+    pub sender: Party,
+    pub recipient: Party,
+    pub session_uid: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+    pub fanout_id: String,
+    pub topic: Option<String>,
+    pub acked_at: Option<String>,
+}
+#[pymethods]
+impl Message {
+    #[new]
+    #[pyo3(signature = (id, created_at, sender, recipient, session_uid, body, fanout_id, in_reply_to=None, topic=None, acked_at=None))]
+    fn new(
+        id: String,
+        created_at: String,
+        sender: Party,
+        recipient: Party,
+        session_uid: String,
+        body: String,
+        fanout_id: String,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+        acked_at: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            created_at,
+            sender,
+            recipient,
+            session_uid,
+            body,
+            fanout_id,
+            in_reply_to,
+            topic,
+            acked_at,
+        }
+    }
+}
+
 /// The `Disponent` contract — implement over the engine in `crate::core_impl`.
 pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn open(options: Option<OpenOptions>) -> anyhow::Result<Self>;
@@ -652,7 +801,15 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
     fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink>;
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
-    fn send(&self, session_uid: String, input: String) -> anyhow::Result<()>;
+    fn send(
+        &self,
+        body: String,
+        to: Option<SendTarget>,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> anyhow::Result<Vec<Message>>;
+    fn ack(&self, message_id: String) -> anyhow::Result<()>;
+    fn messages(&self, filter: Option<MessagesFilter>) -> anyhow::Result<Vec<Message>>;
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session>;
     fn resume(&self, session_uid: String) -> anyhow::Result<Session>;
     fn reap(&self, session_uid: String) -> anyhow::Result<Session>;
@@ -752,7 +909,7 @@ impl Disponent {
         let core = self.core.clone();
         py.detach(move || core.capabilities()).map_err(err)
     }
-    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, labels=None))]
+    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
     fn dispatch(
         &self,
         py: Python<'_>,
@@ -769,6 +926,7 @@ impl Disponent {
         timeout_secs: Option<i32>,
         max_budget: Option<String>,
         unchecked: Option<bool>,
+        tags: Option<Vec<String>>,
         labels: Option<String>,
     ) -> PyResult<Session> {
         let dispatch_spec_arg = DispatchSpec {
@@ -785,6 +943,7 @@ impl Disponent {
             timeout_secs,
             max_budget,
             unchecked,
+            tags,
             labels,
         };
 
@@ -839,10 +998,68 @@ impl Disponent {
             stream: self.core.events(Some(event_options_arg)).map_err(err)?,
         })
     }
-    #[pyo3(signature = (session_uid, input))]
-    fn send(&self, py: Python<'_>, session_uid: String, input: String) -> PyResult<()> {
+    /// The one messaging primitive (notes/manager-worker-comms.md §6). A Manager
+    /// `to` names a tagged worker subset (fan-out) or the user; recipients resolve
+    /// at send time to a concrete list (a snapshot, never kept live). One Message
+    /// is minted per matched session, all sharing a freshly minted `fanoutId`;
+    /// `topic` (optional) is the supersession key for latest-wins (§7). Returns the
+    /// Messages minted. Delivery is the reader's `events` pull; a message to a
+    /// concrete live worker is also delivered best-effort to its prompt on an
+    /// interact-capable env (the legacy `send` behavior, now one backend delivery).
+    /// Worker self-send (recipient forced to the Manager) is a worker-role MCP
+    /// concern, deferred — the core send is the Manager surface.
+    #[pyo3(signature = (body, tags=None, sessions=None, user=None, in_reply_to=None, topic=None))]
+    fn send(
+        &self,
+        py: Python<'_>,
+        body: String,
+        tags: Option<Vec<String>>,
+        sessions: Option<Vec<String>>,
+        user: Option<String>,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> PyResult<Vec<Message>> {
+        let send_target_arg = SendTarget {
+            tags,
+            sessions,
+            user,
+        };
+
         let core = self.core.clone();
-        py.detach(move || core.send(session_uid, input))
+        py.detach(move || core.send(body, Some(send_target_arg), in_reply_to, topic))
+            .map_err(err)
+    }
+    /// Acknowledge a message you received (received/handled): stamps `ackedAt`,
+    /// which the Manager observes across a `fanoutId` to see "N of M acted" (§7).
+    /// Idempotent.
+    #[pyo3(signature = (message_id))]
+    fn ack(&self, py: Python<'_>, message_id: String) -> PyResult<()> {
+        let core = self.core.clone();
+        py.detach(move || core.ack(message_id)).map_err(err)
+    }
+    /// Read Messages, filtered. The Manager's fan-out ack-progress view
+    /// (`{fanoutId}`) and a recipient's inbox (`{recipient, sessionUid}`, optionally
+    /// `latestPerTopic` for the read-side latest-wins collapse, §7).
+    #[pyo3(signature = (fanout_id=None, recipient=None, session_uid=None, topic=None, latest_per_topic=None))]
+    fn messages(
+        &self,
+        py: Python<'_>,
+        fanout_id: Option<String>,
+        recipient: Option<Party>,
+        session_uid: Option<String>,
+        topic: Option<String>,
+        latest_per_topic: Option<bool>,
+    ) -> PyResult<Vec<Message>> {
+        let messages_filter_arg = MessagesFilter {
+            fanout_id,
+            recipient,
+            session_uid,
+            topic,
+            latest_per_topic,
+        };
+
+        let core = self.core.clone();
+        py.detach(move || core.messages(Some(messages_filter_arg)))
             .map_err(err)
     }
     #[pyo3(signature = (session_uid))]
@@ -893,6 +1110,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TemplateKind>()?;
     m.add_class::<CapabilityKind>()?;
     m.add_class::<EventKind>()?;
+    m.add_class::<Party>()?;
     m.add_class::<Fidelity>()?;
     m.add_class::<ArtifactKind>()?;
     m.add_class::<McpRole>()?;
@@ -904,11 +1122,14 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<UsageDelta>()?;
     m.add_class::<ArtifactRef>()?;
     m.add_class::<RawObservation>()?;
+    m.add_class::<MailRef>()?;
     m.add_class::<OpenOptions>()?;
     m.add_class::<DispatchSpec>()?;
     m.add_class::<SessionFilter>()?;
     m.add_class::<WorkspaceLink>()?;
     m.add_class::<EventOptions>()?;
+    m.add_class::<SendTarget>()?;
+    m.add_class::<MessagesFilter>()?;
     m.add_class::<ReconcileReport>()?;
     m.add_class::<McpOptions>()?;
     m.add_class::<DriverPlanOptions>()?;
@@ -918,6 +1139,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Offering>()?;
     m.add_class::<Session>()?;
     m.add_class::<Event>()?;
+    m.add_class::<Message>()?;
     m.add_class::<Events>()?;
     m.add_class::<DriverPlan>()?;
     m.add_class::<Disponent>()?;

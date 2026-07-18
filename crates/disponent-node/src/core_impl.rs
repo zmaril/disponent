@@ -56,8 +56,9 @@ wire_enum!(ExitReason {
 wire_enum!(EventKind {
     State => "state", Message => "message", ToolCall => "tool_call",
     ToolResult => "tool_result", Log => "log", Usage => "usage",
-    Artifact => "artifact", Raw => "raw",
+    Artifact => "artifact", Raw => "raw", Mail => "mail",
 });
+wire_enum!(Party { Manager => "manager", Worker => "worker", User => "user" });
 wire_enum!(Fidelity { Exact => "exact", Derived => "derived", Scraped => "scraped" });
 wire_enum!(IsolationKind {
     None => "none", Worktree => "worktree", Container => "container", Vm => "vm",
@@ -139,7 +140,40 @@ fn env_capability_out(c: mcp::EnvCapability) -> anyhow::Result<EnvCapability> {
     })
 }
 
+fn message_out(m: mcp::Message) -> anyhow::Result<Message> {
+    Ok(Message {
+        id: m.id,
+        created_at: m.created_at,
+        sender: Party::from_wire(&m.sender)?,
+        recipient: Party::from_wire(&m.recipient)?,
+        session_uid: m.session_uid,
+        body: m.body,
+        in_reply_to: m.in_reply_to,
+        fanout_id: m.fanout_id,
+        topic: m.topic,
+        acked_at: m.acked_at,
+    })
+}
+
 // ── napi DTO → engine DTO ──
+
+fn send_target_in(t: SendTarget) -> mcp::SendTarget {
+    mcp::SendTarget {
+        tags: t.tags,
+        sessions: t.sessions,
+        user: t.user,
+    }
+}
+
+fn messages_filter_in(f: MessagesFilter) -> mcp::MessagesFilter {
+    mcp::MessagesFilter {
+        fanout_id: f.fanout_id,
+        recipient: f.recipient.map(|p| p.to_wire().to_string()),
+        session_uid: f.session_uid,
+        topic: f.topic,
+        latest_per_topic: f.latest_per_topic,
+    }
+}
 
 fn spec_in(spec: DispatchSpec) -> anyhow::Result<mcp::DispatchSpec> {
     Ok(mcp::DispatchSpec {
@@ -156,6 +190,7 @@ fn spec_in(spec: DispatchSpec) -> anyhow::Result<mcp::DispatchSpec> {
         timeout_secs: spec.timeout_secs,
         max_budget: spec.max_budget,
         unchecked: spec.unchecked,
+        tags: spec.tags,
         labels: spec
             .labels
             .map(|raw| serde_json::from_str(&raw).context("labels: not valid JSON"))
@@ -268,8 +303,30 @@ impl DisponentCore for DisponentImpl {
         }))
     }
 
-    fn send(&self, session_uid: String, input: String) -> anyhow::Result<()> {
-        self.engine.send(session_uid, input)
+    fn send(
+        &self,
+        body: String,
+        to: Option<SendTarget>,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> anyhow::Result<Vec<Message>> {
+        self.engine
+            .send(body, to.map(send_target_in), in_reply_to, topic)?
+            .into_iter()
+            .map(message_out)
+            .collect()
+    }
+
+    fn ack(&self, message_id: String) -> anyhow::Result<()> {
+        self.engine.ack(message_id)
+    }
+
+    fn messages(&self, filter: Option<MessagesFilter>) -> anyhow::Result<Vec<Message>> {
+        self.engine
+            .messages(filter.map(messages_filter_in))?
+            .into_iter()
+            .map(message_out)
+            .collect()
     }
 
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session> {

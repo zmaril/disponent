@@ -154,6 +154,19 @@ pub enum EventKind {
     Artifact,
     #[napi(value = "raw")]
     Raw,
+    #[napi(value = "mail")]
+    Mail,
+}
+
+#[napi(string_enum)]
+#[derive(Clone, Copy)]
+pub enum Party {
+    #[napi(value = "manager")]
+    Manager,
+    #[napi(value = "worker")]
+    Worker,
+    #[napi(value = "user")]
+    User,
 }
 
 #[napi(string_enum)]
@@ -250,6 +263,19 @@ pub struct RawObservation {
     pub data: String,
 }
 
+/// Pointer + the fields a reader needs to triage a `mail` event without
+/// fetching the Message: direction (sender/recipient), the fan-out it belongs
+/// to, and its topic (so a reader can group by topic for latest-wins).
+#[napi(object)]
+#[derive(Clone)]
+pub struct MailRef {
+    pub message_id: String,
+    pub sender: Party,
+    pub recipient: Party,
+    pub fanout_id: String,
+    pub topic: Option<String>,
+}
+
 #[napi(object)]
 #[derive(Clone)]
 pub struct OpenOptions {
@@ -273,6 +299,7 @@ pub struct DispatchSpec {
     pub timeout_secs: Option<i32>,
     pub max_budget: Option<String>,
     pub unchecked: Option<bool>,
+    pub tags: Option<Vec<String>>,
     pub labels: Option<String>,
 }
 
@@ -300,6 +327,28 @@ pub struct EventOptions {
     pub session_uid: Option<String>,
     pub after_idx: Option<i64>,
     pub kinds: Option<Vec<EventKind>>,
+}
+
+/// Where a Manager-sent message goes. A worker never fills this: the
+/// worker-role server defaults recipient = its Manager, anchored to the bound
+/// session (deferred to the MCP layer). A Manager sets exactly one destination.
+#[napi(object)]
+#[derive(Clone)]
+pub struct SendTarget {
+    pub tags: Option<Vec<String>>,
+    pub sessions: Option<Vec<String>>,
+    pub user: Option<String>,
+}
+
+/// Filter for the `messages` read. Absent fields don't constrain.
+#[napi(object)]
+#[derive(Clone)]
+pub struct MessagesFilter {
+    pub fanout_id: Option<String>,
+    pub recipient: Option<Party>,
+    pub session_uid: Option<String>,
+    pub topic: Option<String>,
+    pub latest_per_topic: Option<bool>,
 }
 
 #[napi(object)]
@@ -395,6 +444,26 @@ pub struct Event {
     pub payload: String,
 }
 
+/// One message dropped in one inbox — the manager↔worker communication
+/// primitive (notes/manager-worker-comms.md). The Manager mints these addressed
+/// to a worker or the user; a worker mints them addressed (implicitly) to its
+/// Manager. Disponent owns these rows — no environment backs them, so reconcile
+/// skips them and durability is the SQLite mirror (design §11).
+#[napi(object)]
+#[derive(Clone)]
+pub struct Message {
+    pub id: String,
+    pub created_at: String,
+    pub sender: Party,
+    pub recipient: Party,
+    pub session_uid: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+    pub fanout_id: String,
+    pub topic: Option<String>,
+    pub acked_at: Option<String>,
+}
+
 /// The `Disponent` contract — implement over the engine in `crate::core_impl`.
 pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn open(options: Option<OpenOptions>) -> anyhow::Result<Self>;
@@ -407,7 +476,15 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     fn sessions(&self, filter: Option<SessionFilter>) -> anyhow::Result<Vec<Session>>;
     fn workspace_link(&self, session_uid: String) -> anyhow::Result<WorkspaceLink>;
     fn events(&self, options: Option<EventOptions>) -> anyhow::Result<Box<dyn PollStream<Event>>>;
-    fn send(&self, session_uid: String, input: String) -> anyhow::Result<()>;
+    fn send(
+        &self,
+        body: String,
+        to: Option<SendTarget>,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> anyhow::Result<Vec<Message>>;
+    fn ack(&self, message_id: String) -> anyhow::Result<()>;
+    fn messages(&self, filter: Option<MessagesFilter>) -> anyhow::Result<Vec<Message>>;
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session>;
     fn resume(&self, session_uid: String) -> anyhow::Result<Session>;
     fn reap(&self, session_uid: String) -> anyhow::Result<Session>;
@@ -607,16 +684,53 @@ impl Task for WorkspaceLinkTask {
 
 pub struct SendTask {
     core: Arc<crate::core_impl::DisponentImpl>,
-    session_uid: String,
-    input: String,
+    body: String,
+    to: Option<SendTarget>,
+    in_reply_to: Option<String>,
+    topic: Option<String>,
 }
 impl Task for SendTask {
+    type Output = Vec<Message>;
+    type JsValue = Vec<Message>;
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.core
+            .send(
+                self.body.clone(),
+                self.to.clone(),
+                self.in_reply_to.clone(),
+                self.topic.clone(),
+            )
+            .map_err(err)
+    }
+    fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
+        Ok(o)
+    }
+}
+
+pub struct AckTask {
+    core: Arc<crate::core_impl::DisponentImpl>,
+    message_id: String,
+}
+impl Task for AckTask {
     type Output = ();
     type JsValue = ();
     fn compute(&mut self) -> Result<Self::Output> {
-        self.core
-            .send(self.session_uid.clone(), self.input.clone())
-            .map_err(err)
+        self.core.ack(self.message_id.clone()).map_err(err)
+    }
+    fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
+        Ok(o)
+    }
+}
+
+pub struct MessagesTask {
+    core: Arc<crate::core_impl::DisponentImpl>,
+    filter: Option<MessagesFilter>,
+}
+impl Task for MessagesTask {
+    type Output = Vec<Message>;
+    type JsValue = Vec<Message>;
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.core.messages(self.filter.clone()).map_err(err)
     }
     fn resolve(&mut self, _env: Env, o: Self::Output) -> Result<Self::JsValue> {
         Ok(o)
@@ -765,12 +879,50 @@ impl Disponent {
             stream: Arc::from(self.core.events(options).map_err(err)?),
         })
     }
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn send(&self, session_uid: String, input: String) -> AsyncTask<SendTask> {
+    /// The one messaging primitive (notes/manager-worker-comms.md §6). A Manager
+    /// `to` names a tagged worker subset (fan-out) or the user; recipients resolve
+    /// at send time to a concrete list (a snapshot, never kept live). One Message
+    /// is minted per matched session, all sharing a freshly minted `fanoutId`;
+    /// `topic` (optional) is the supersession key for latest-wins (§7). Returns the
+    /// Messages minted. Delivery is the reader's `events` pull; a message to a
+    /// concrete live worker is also delivered best-effort to its prompt on an
+    /// interact-capable env (the legacy `send` behavior, now one backend delivery).
+    /// Worker self-send (recipient forced to the Manager) is a worker-role MCP
+    /// concern, deferred — the core send is the Manager surface.
+    #[napi(ts_return_type = "Promise<Message[]>")]
+    pub fn send(
+        &self,
+        body: String,
+        to: Option<SendTarget>,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> AsyncTask<SendTask> {
         AsyncTask::new(SendTask {
             core: self.core.clone(),
-            session_uid,
-            input,
+            body,
+            to,
+            in_reply_to,
+            topic,
+        })
+    }
+    /// Acknowledge a message you received (received/handled): stamps `ackedAt`,
+    /// which the Manager observes across a `fanoutId` to see "N of M acted" (§7).
+    /// Idempotent.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn ack(&self, message_id: String) -> AsyncTask<AckTask> {
+        AsyncTask::new(AckTask {
+            core: self.core.clone(),
+            message_id,
+        })
+    }
+    /// Read Messages, filtered. The Manager's fan-out ack-progress view
+    /// (`{fanoutId}`) and a recipient's inbox (`{recipient, sessionUid}`, optionally
+    /// `latestPerTopic` for the read-side latest-wins collapse, §7).
+    #[napi(ts_return_type = "Promise<Message[]>")]
+    pub fn messages(&self, filter: Option<MessagesFilter>) -> AsyncTask<MessagesTask> {
+        AsyncTask::new(MessagesTask {
+            core: self.core.clone(),
+            filter,
         })
     }
     #[napi(ts_return_type = "Promise<Session>")]

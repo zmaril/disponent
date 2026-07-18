@@ -64,6 +64,7 @@ pub const PG_TABLES: &[TableSchema] = &[
   "timeout_secs" integer,
   "max_budget" numeric,
   "via_mcp_depth" integer NOT NULL,
+  "tags" jsonb,
   "labels" text
 );
 "#,
@@ -103,6 +104,23 @@ pub const PG_TABLES: &[TableSchema] = &[
   "payload_kind" text NOT NULL,
   "payload" jsonb NOT NULL,
   PRIMARY KEY ("session_uid", "idx")
+);
+"#,
+    },
+    TableSchema {
+        name: "messages",
+        pk: &["id"],
+        ddl: r#"CREATE TABLE IF NOT EXISTS "__table__" (
+  "id" text PRIMARY KEY,
+  "created_at" timestamptz NOT NULL,
+  "sender" text NOT NULL,
+  "recipient" text NOT NULL,
+  "session_uid" text NOT NULL,
+  "body" text NOT NULL,
+  "in_reply_to" text,
+  "fanout_id" text NOT NULL,
+  "topic" text,
+  "acked_at" timestamptz
 );
 "#,
     },
@@ -224,6 +242,7 @@ pub const SQLITE_TABLES: &[TableSchema] = &[
   "timeout_secs" integer,
   "max_budget" numeric,
   "via_mcp_depth" integer NOT NULL,
+  "tags" text,
   "labels" text
 );
 "#,
@@ -263,6 +282,23 @@ pub const SQLITE_TABLES: &[TableSchema] = &[
   "payload_kind" text NOT NULL,
   "payload" text NOT NULL,
   PRIMARY KEY ("session_uid", "idx")
+);
+"#,
+    },
+    TableSchema {
+        name: "messages",
+        pk: &["id"],
+        ddl: r#"CREATE TABLE IF NOT EXISTS "__table__" (
+  "id" text PRIMARY KEY,
+  "created_at" text NOT NULL,
+  "sender" text NOT NULL,
+  "recipient" text NOT NULL,
+  "session_uid" text NOT NULL,
+  "body" text NOT NULL,
+  "in_reply_to" text,
+  "fanout_id" text NOT NULL,
+  "topic" text,
+  "acked_at" text
 );
 "#,
     },
@@ -384,6 +420,7 @@ pub const DUCKDB_TABLES: &[TableSchema] = &[
   "timeout_secs" integer,
   "max_budget" numeric,
   "via_mcp_depth" integer NOT NULL,
+  "tags" json,
   "labels" text
 );
 "#,
@@ -423,6 +460,23 @@ pub const DUCKDB_TABLES: &[TableSchema] = &[
   "payload_kind" text NOT NULL,
   "payload" json NOT NULL,
   PRIMARY KEY ("session_uid", "idx")
+);
+"#,
+    },
+    TableSchema {
+        name: "messages",
+        pk: &["id"],
+        ddl: r#"CREATE TABLE IF NOT EXISTS "__table__" (
+  "id" text PRIMARY KEY,
+  "created_at" timestamp NOT NULL,
+  "sender" text NOT NULL,
+  "recipient" text NOT NULL,
+  "session_uid" text NOT NULL,
+  "body" text NOT NULL,
+  "in_reply_to" text,
+  "fanout_id" text NOT NULL,
+  "topic" text,
+  "acked_at" timestamp
 );
 "#,
     },

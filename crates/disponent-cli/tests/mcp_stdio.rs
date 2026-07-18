@@ -105,9 +105,12 @@ fn supervisor_walks_the_whole_flow() {
     let mut server = Server::start("supervisor");
 
     let names = server.tool_names();
-    assert_eq!(names.len(), 15, "the full generated surface: {names:?}");
+    assert_eq!(names.len(), 17, "the full generated surface: {names:?}");
     assert!(names.contains(&"disponent_dispatch".to_string()));
     assert!(names.contains(&"disponent_workspace_link".to_string()));
+    assert!(names.contains(&"disponent_send".to_string()));
+    assert!(names.contains(&"disponent_ack".to_string()));
+    assert!(names.contains(&"disponent_messages".to_string()));
 
     let (envs, err) = server.call("disponent_environments", json!({}));
     assert!(!err);
@@ -254,9 +257,11 @@ fn worker_sees_only_the_readonly_surface() {
             "disponent_sessions",
             "disponent_workspace_link",
             "disponent_events",
+            "disponent_messages",
             "disponent_driver_plan",
         ],
-        "observe-only: exactly the readonly tools"
+        "observe-only: exactly the readonly tools (send/ack stay hidden until the \
+         worker surface is widened)"
     );
 
     // calling a hidden tool is a protocol-level rejection, not a silent no-op

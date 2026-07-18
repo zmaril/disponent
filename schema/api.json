@@ -144,6 +144,41 @@
       ]
     },
     {
+      "name": "MailRef",
+      "doc": "Pointer + the fields a reader needs to triage a `mail` event without\nfetching the Message: direction (sender/recipient), the fan-out it belongs\nto, and its topic (so a reader can group by topic for latest-wins).",
+      "fields": [
+        {
+          "name": "messageId",
+          "type": "MessageId",
+          "nullable": false
+        },
+        {
+          "name": "sender",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "fanoutId",
+          "type": "FanoutId",
+          "nullable": false
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "nullable": true
+        }
+      ]
+    },
+    {
       "name": "OpenOptions",
       "doc": null,
       "fields": [
@@ -231,6 +266,13 @@
           "nullable": true
         },
         {
+          "name": "tags",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
           "name": "labels",
           "type": "Json",
           "nullable": true
@@ -307,6 +349,64 @@
               "enum": "EventKind"
             }
           },
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "SendTarget",
+      "doc": "Where a Manager-sent message goes. A worker never fills this: the\nworker-role server defaults recipient = its Manager, anchored to the bound\nsession (deferred to the MCP layer). A Manager sets exactly one destination.",
+      "fields": [
+        {
+          "name": "tags",
+          "type": {
+            "list": "string"
+          },
+          "nullable": true
+        },
+        {
+          "name": "sessions",
+          "type": {
+            "list": "SessionUid"
+          },
+          "nullable": true
+        },
+        {
+          "name": "user",
+          "type": "SessionUid",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "name": "MessagesFilter",
+      "doc": "Filter for the `messages` read. Absent fields don't constrain.",
+      "fields": [
+        {
+          "name": "fanoutId",
+          "type": "FanoutId",
+          "nullable": true
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": true
+        },
+        {
+          "name": "sessionUid",
+          "type": "SessionUid",
+          "nullable": true
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "latestPerTopic",
+          "type": "boolean",
           "nullable": true
         }
       ]
@@ -582,6 +682,66 @@
           "nullable": false
         }
       ]
+    },
+    {
+      "name": "Message",
+      "doc": "One message dropped in one inbox — the manager↔worker communication\nprimitive (notes/manager-worker-comms.md). The Manager mints these addressed\nto a worker or the user; a worker mints them addressed (implicitly) to its\nManager. Disponent owns these rows — no environment backs them, so reconcile\nskips them and durability is the SQLite mirror (design §11).",
+      "fields": [
+        {
+          "name": "id",
+          "type": "MessageId",
+          "nullable": false
+        },
+        {
+          "name": "createdAt",
+          "type": "utcDateTime",
+          "nullable": false
+        },
+        {
+          "name": "sender",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "recipient",
+          "type": {
+            "enum": "Party"
+          },
+          "nullable": false
+        },
+        {
+          "name": "sessionUid",
+          "type": "SessionUid",
+          "nullable": false
+        },
+        {
+          "name": "body",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "inReplyTo",
+          "type": "MessageId",
+          "nullable": true
+        },
+        {
+          "name": "fanoutId",
+          "type": "FanoutId",
+          "nullable": false
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "ackedAt",
+          "type": "utcDateTime",
+          "nullable": true
+        }
+      ]
     }
   ],
   "unions": [
@@ -635,6 +795,12 @@
           "tag": "raw",
           "type": {
             "model": "RawObservation"
+          }
+        },
+        {
+          "tag": "mail",
+          "type": {
+            "model": "MailRef"
           }
         }
       ]
@@ -801,19 +967,68 @@
         },
         {
           "name": "send",
-          "doc": null,
+          "doc": "The one messaging primitive (notes/manager-worker-comms.md §6). A Manager\n`to` names a tagged worker subset (fan-out) or the user; recipients resolve\nat send time to a concrete list (a snapshot, never kept live). One Message\nis minted per matched session, all sharing a freshly minted `fanoutId`;\n`topic` (optional) is the supersession key for latest-wins (§7). Returns the\nMessages minted. Delivery is the reader's `events` pull; a message to a\nconcrete live worker is also delivered best-effort to its prompt on an\ninteract-capable env (the legacy `send` behavior, now one backend delivery).\nWorker self-send (recipient forced to the Manager) is a worker-role MCP\nconcern, deferred — the core send is the Manager surface.",
           "shape": "unary",
           "params": [
             {
-              "name": "sessionUid",
-              "type": "SessionUid"
+              "name": "body",
+              "type": "string"
             },
             {
-              "name": "input",
-              "type": "string"
+              "name": "to",
+              "type": {
+                "model": "SendTarget"
+              },
+              "optional": true
+            },
+            {
+              "name": "inReplyTo",
+              "type": "MessageId",
+              "optional": true
+            },
+            {
+              "name": "topic",
+              "type": "string",
+              "optional": true
+            }
+          ],
+          "returns": {
+            "list": {
+              "model": "Message"
+            }
+          }
+        },
+        {
+          "name": "ack",
+          "doc": "Acknowledge a message you received (received/handled): stamps `ackedAt`,\nwhich the Manager observes across a `fanoutId` to see \"N of M acted\" (§7).\nIdempotent.",
+          "shape": "unary",
+          "params": [
+            {
+              "name": "messageId",
+              "type": "MessageId"
             }
           ],
           "returns": "void"
+        },
+        {
+          "name": "messages",
+          "doc": "Read Messages, filtered. The Manager's fan-out ack-progress view\n(`{fanoutId}`) and a recipient's inbox (`{recipient, sessionUid}`, optionally\n`latestPerTopic` for the read-side latest-wins collapse, §7).",
+          "shape": "unary",
+          "readonly": true,
+          "params": [
+            {
+              "name": "filter",
+              "type": {
+                "model": "MessagesFilter"
+              },
+              "optional": true
+            }
+          ],
+          "returns": {
+            "list": {
+              "model": "Message"
+            }
+          }
         },
         {
           "name": "cancel",

@@ -7,6 +7,7 @@ import {
   Disponent,
   EnvKind,
   EventKind,
+  Party,
   SessionState,
   setEnv,
   version,
@@ -78,7 +79,18 @@ test("the whole lifecycle from JS", async () => {
   const second = await events.next();
   expect(second!.kind).toBe(EventKind.State);
 
-  await d.send(session.uid, "how goes it?");
+  // send is the manager↔worker messaging primitive: a `sessions` target mints
+  // one Message per recipient and (best-effort) prompts the live worker.
+  const minted = await d.send("how goes it?", { sessions: [session.uid] });
+  expect(minted.length).toBe(1);
+  expect(minted[0].sender).toBe(Party.Manager);
+  expect(minted[0].recipient).toBe(Party.Worker);
+
+  const inbox = await d.messages({ sessionUid: session.uid });
+  expect(inbox.length).toBe(1);
+  await d.ack(minted[0].id);
+  const acked = await d.messages({ sessionUid: session.uid });
+  expect(acked[0].ackedAt).not.toBeNull();
 
   const cancelled = await d.cancel(session.uid);
   expect(cancelled.state).toBe(SessionState.Cancelled);

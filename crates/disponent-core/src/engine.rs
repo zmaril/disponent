@@ -26,8 +26,9 @@ use crate::catalog::{self, upsert};
 use crate::detectors::Detectors;
 use crate::local::LocalTmux;
 use crate::mcp_generated::{
-    DispatchSpec, DriverPlanOptions, EnvCapability, Environment, Event, EventOptions, Offering,
-    ReconcileReport, Session, SessionFilter, Statement, WorkspaceLink,
+    DispatchSpec, DriverPlanOptions, EnvCapability, Environment, Event, EventOptions, Message,
+    MessagesFilter, Offering, ReconcileReport, SendTarget, Session, SessionFilter, Statement,
+    WorkspaceLink,
 };
 use crate::modal::Modal;
 use crate::observe::{self, Observation};
@@ -65,6 +66,9 @@ struct Ledger {
     /// Append-only, in observation order across all sessions — the stream the
     /// `events` cursor pages over (`after` = items already consumed).
     events: Vec<Event>,
+    /// Control-plane manager↔worker messages. Disponent owns these (no env
+    /// backs them): reconcile skips them, durability is the sink mirror.
+    messages: Vec<Message>,
     sink: Sink,
 }
 
@@ -218,6 +222,7 @@ impl Engine {
                 .collect();
             ledger.sessions = restored.sessions;
             ledger.events = restored.events;
+            ledger.messages = restored.messages;
         }
         ledger.sink = sink;
         let engine = Engine::assemble(ledger, backends);
@@ -561,6 +566,7 @@ impl DispatchRow {
                 "timeout_secs",
                 "max_budget",
                 "via_mcp_depth",
+                "tags",
                 "labels",
             ],
             vec![vec![
@@ -579,6 +585,7 @@ impl DispatchRow {
                 json!(self.spec.timeout_secs),
                 json!(self.spec.max_budget),
                 json!(0),
+                json!(self.spec.tags),
                 self.spec.labels.clone().unwrap_or(serde_json::Value::Null),
             ]],
         )
@@ -1073,35 +1080,24 @@ impl crate::mcp_generated::DisponentMcp for Engine {
             .collect())
     }
 
-    fn send(&self, session_uid: String, input: String) -> anyhow::Result<()> {
-        let (state, handle, backend, adapter) = {
-            let mut ledger = self.ledger.lock().unwrap();
-            let (backend, adapter) = self.routing(&ledger, &session_uid);
-            let session = ledger.session_mut(&session_uid)?;
-            (
-                session.state.clone(),
-                session.env_handle.clone(),
-                backend,
-                adapter,
-            )
-        };
-        if state != "running" {
-            bail!("can't send to session {session_uid}: state is {state}, not running");
-        }
-        let (Some(backend), Some(handle), Some(adapter)) = (backend, handle, adapter) else {
-            bail!("session {session_uid} has no reachable worker");
-        };
-        // The env round-trip happens outside the ledger lock; the event records
-        // after. The adapter delivers the follow-up (its `prompt`).
-        adapter.prompt(&*backend.compute(&handle)?, &input)?;
-        let mut ledger = self.ledger.lock().unwrap();
-        let event = ledger.push_event(
-            &session_uid,
-            "message",
-            json!({"kind": "message", "payload": {"role": "supervisor", "text": input}}),
-        );
-        ledger.mirror(vec![event_mutation(&event)])?;
-        Ok(())
+    /// The one messaging primitive (notes/manager-worker-comms.md §6); the body
+    /// lives in [`messaging`] to keep this file under the size budget.
+    fn send(
+        &self,
+        body: String,
+        to: Option<SendTarget>,
+        in_reply_to: Option<String>,
+        topic: Option<String>,
+    ) -> anyhow::Result<Vec<Message>> {
+        messaging::send(self, body, to, in_reply_to, topic)
+    }
+
+    fn ack(&self, message_id: String) -> anyhow::Result<()> {
+        messaging::ack(self, message_id)
+    }
+
+    fn messages(&self, filter: Option<MessagesFilter>) -> anyhow::Result<Vec<Message>> {
+        messaging::messages(self, filter)
     }
 
     fn cancel(&self, session_uid: String) -> anyhow::Result<Session> {
@@ -1420,6 +1416,9 @@ impl crate::mcp_generated::DisponentMcp for Engine {
         for e in &ledger.events {
             tx.mutations.push(event_mutation(e));
         }
+        for m in &ledger.messages {
+            tx.mutations.push(messaging::message_mutation(m));
+        }
         tx.mutations.retain(|m| wanted(&m.table));
 
         let plan = crate::sink::codec(dialect)?
@@ -1471,6 +1470,8 @@ impl Default for DriverPlanOptions {
         }
     }
 }
+
+mod messaging;
 
 #[cfg(test)]
 mod tests;

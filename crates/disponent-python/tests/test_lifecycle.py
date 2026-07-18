@@ -11,7 +11,7 @@ import json
 
 import conftest  # noqa: F401  (imports for its env-var side effects)
 import pytest
-from disponent import CapabilityKind, Disponent, EnvKind, EventKind, SessionState
+from disponent import CapabilityKind, Disponent, EnvKind, EventKind, Party, SessionState
 
 
 def test_whole_lifecycle():
@@ -57,7 +57,11 @@ def test_whole_lifecycle():
     second = next(events)
     assert second.kind == EventKind.State
 
-    d.send(session.uid, "how goes it?")
+    minted = d.send("how goes it?", sessions=[session.uid])
+    assert len(minted) == 1
+    assert minted[0].recipient == Party.Worker
+    d.ack(minted[0].id)
+    assert d.messages(session_uid=session.uid)[0].acked_at is not None
 
     cancelled = d.cancel(session.uid)
     assert cancelled.state == SessionState.Cancelled
