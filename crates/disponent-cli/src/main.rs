@@ -1,6 +1,7 @@
 //! The disponent CLI. `disponent mcp` is the stdio MCP server over an
-//! in-process engine; `disponent hold` / `disponent hold-attach` are the M0
-//! headless pty holder and its attach client (notes/owning-the-terminal.md).
+//! in-process engine; `disponent hold` / `disponent attach` are the headless
+//! pty holder and its attach client (notes/owning-the-terminal.md). `attach` is
+//! reader-default; `--write` requests the single writer lock (M2a).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -66,16 +67,26 @@ enum Cmd {
         argv: Vec<String>,
     },
 
-    /// Attach to a held session: forward stdin, print its output, resize with
-    /// the terminal, and exit with the child's code. Restores the terminal on
-    /// every exit path.
-    HoldAttach {
+    /// Attach to a held session. Reader by default: streams the session's
+    /// output but does NOT forward your stdin (design §6). Pass `--write` to
+    /// request the single writer lock and drive the session — forwarding stdin
+    /// and resizes; if another attacher already holds the writer you stay
+    /// read-only. Exits with the child's code; restores the terminal on every
+    /// exit path.
+    ///
+    /// `hold-attach` is a back-compat alias.
+    #[command(visible_alias = "hold-attach")]
+    Attach {
         /// The session uid to attach to.
         uid: String,
 
         /// Where the socket lives (must match the holder's `--socket-dir`).
         #[arg(long)]
         socket_dir: Option<PathBuf>,
+
+        /// Request the writer lock (drive the session). Reader-only otherwise.
+        #[arg(long, visible_alias = "take")]
+        write: bool,
     },
 }
 
@@ -99,8 +110,12 @@ fn main() -> anyhow::Result<()> {
             let code = run_hold(uid, cwd, socket_dir, ring_bytes, daemonize, argv)?;
             std::process::exit(code);
         }
-        Cmd::HoldAttach { uid, socket_dir } => {
-            let code = attach(socket_dir.as_deref(), &uid)?;
+        Cmd::Attach {
+            uid,
+            socket_dir,
+            write,
+        } => {
+            let code = attach(socket_dir.as_deref(), &uid, write)?;
             std::process::exit(code);
         }
     }

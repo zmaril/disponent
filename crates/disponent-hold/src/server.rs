@@ -11,10 +11,11 @@
 //! * **accept** — the unix listener; one reader thread + one writer thread per
 //!   attached client.
 //!
-//! M0 note: any attached client may also write (Input/Resize). The single
-//! *writer lock* — one writer, N readers — is M2; this milestone is
-//! multi-reader with unrestricted write, which is enough for the engine
-//! observer + a person on the box.
+//! Writer lock (M2a, design §6): a client declares a role in the handshake —
+//! `Reader` (default) or `Writer`. The holder grants Writer only when none is
+//! held; a second Writer is admitted read-only (`writer_busy`). Only the
+//! writer's `Input`/`Resize` reach the pty; readers observe. `Signal` is an
+//! ungated control frame. The lock frees when the writer disconnects.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -29,7 +30,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::protocol::{self, encode_data_chunks, encode_server, Exit, ServerKind};
+use crate::protocol::{self, encode_data_chunks, encode_server, Exit, Role, ServerKind};
 use crate::pty::{resize_master, write_master, Pty, WinSize};
 use crate::ring::Ring;
 
@@ -113,13 +114,16 @@ struct Client {
 }
 
 /// The holder's shared state, guarded by one mutex so ring pushes, client
-/// registration, and exit all serialize — no lost/duplicated bytes at an
-/// attach boundary.
+/// registration, the writer lock, and exit all serialize — no lost/duplicated
+/// bytes and no two-writer race at an attach boundary.
 struct Inner {
     ring: Ring,
     clients: Vec<Client>,
     exit: Option<Exit>,
     next_id: u64,
+    /// The id of the client currently holding the single writer lock (design
+    /// §6), or `None` when the writer channel is free. At most one at a time.
+    writer_id: Option<u64>,
 }
 
 struct Shared {
@@ -184,6 +188,7 @@ impl Holder {
                 clients: Vec::new(),
                 exit: None,
                 next_id: 0,
+                writer_id: None,
             }),
             cv: Condvar::new(),
         });
@@ -363,19 +368,29 @@ fn accept_loop(listener: UnixListener, shared: Arc<Shared>, shutdown: Arc<Atomic
     }
 }
 
-/// Serve one client: handshake, replay the ring (+ exit if already gone), then
-/// stream live frames out while relaying Input/Resize in.
+/// Serve one client: read its role request, grant/deny the writer lock, reply,
+/// replay the ring (+ exit if already gone), then stream live frames out while
+/// relaying a writer's Input/Resize in.
 fn handle_client(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
-    // 1. handshake, written directly before the writer thread starts.
-    protocol::write_handshake(&mut stream)?;
+    // 1. read the client's role request (the first line on the wire), then
+    //    decide the grant under the lock so two concurrent Writer requests
+    //    can't both win.
+    let requested = protocol::read_role_request(&mut stream)?;
 
-    // 2. register + replay atomically under the inner lock so no live byte is
-    //    lost or duplicated at the boundary.
-    let (id, rx) = {
+    // 2. register + grant + replay atomically under the inner lock so no live
+    //    byte is lost/duplicated and the writer lock is race-free.
+    let (id, rx, granted) = {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let mut inner = shared.inner.lock().unwrap();
         let id = inner.next_id;
         inner.next_id += 1;
+        // Grant Writer only if none is held; otherwise admit as a Reader.
+        let granted = if requested == Role::Writer && inner.writer_id.is_none() {
+            inner.writer_id = Some(id);
+            Role::Writer
+        } else {
+            Role::Reader
+        };
         // Replay the ring first (byte-exact scrollback — the M0 tier; a vt100
         // repaint for humans is M3).
         let snapshot = inner.ring.snapshot();
@@ -389,10 +404,16 @@ fn handle_client(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
             let _ = tx.send(encode_server(ServerKind::Exit, &exit.to_payload()));
         }
         inner.clients.push(Client { id, tx });
-        (id, rx)
+        (id, rx, granted)
     };
 
-    // 3. writer thread: drain the client's queue onto the socket.
+    // 3. reply with the granted role. `writer_busy` iff the client asked for
+    //    Writer but was admitted read-only. Written before the writer thread
+    //    starts, so it precedes every frame.
+    let writer_busy = requested == Role::Writer && granted != Role::Writer;
+    protocol::write_handshake_reply(&mut stream, granted, writer_busy)?;
+
+    // 4. writer thread: drain the client's queue onto the socket.
     let mut write_half = stream.try_clone()?;
     let writer = thread::spawn(move || {
         while let Ok(bytes) = rx.recv() {
@@ -403,25 +424,35 @@ fn handle_client(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         }
     });
 
-    // 4. reader loop: client → pty. Any attached client may write in M0 (the
-    //    single-writer lock is M2).
-    let result = client_input_loop(&mut stream, &shared);
+    // 5. reader loop: client → pty, gated by the writer lock (design §6).
+    let result = client_input_loop(&mut stream, &shared, granted);
 
-    // Detach: remove the client (drops tx → the writer thread ends).
+    // Detach: remove the client (drops tx → the writer thread ends) and, if it
+    // held the writer lock, free it so a subsequent writer can acquire it.
     {
         let mut inner = shared.inner.lock().unwrap();
         inner.clients.retain(|c| c.id != id);
+        if inner.writer_id == Some(id) {
+            inner.writer_id = None;
+        }
     }
     let _ = writer.join();
     result
 }
 
-/// Relay a client's Input/Resize frames to the pty until it detaches.
-fn client_input_loop(stream: &mut UnixStream, shared: &Arc<Shared>) -> Result<()> {
+/// Relay a client's frames to the pty until it detaches. Only a `Writer`'s
+/// `Input`/`Resize` reach the pty — a reader's are ignored (design §6). `Signal`
+/// is an ungated control frame: the engine's `kill`/`stop_exec` must work even
+/// while a human holds the writer, so any client may deliver it.
+fn client_input_loop(stream: &mut UnixStream, shared: &Arc<Shared>, role: Role) -> Result<()> {
     use crate::protocol::{read_client_frame, ClientFrame};
+    let is_writer = role == Role::Writer;
     loop {
         match read_client_frame(stream)? {
             None | Some(ClientFrame::Detach) => return Ok(()),
+            // A reader's keystrokes / resizes are a no-op — only the writer
+            // drives the pty.
+            Some(ClientFrame::Input(_)) | Some(ClientFrame::Resize { .. }) if !is_writer => {}
             Some(ClientFrame::Input(bytes)) => {
                 write_master(shared.master_fd, &bytes)?;
             }
@@ -431,6 +462,7 @@ fn client_input_loop(stream: &mut UnixStream, shared: &Arc<Shared>) -> Result<()
             Some(ClientFrame::Signal(sig)) => {
                 // Deliver to the child's whole process group (it's a session
                 // leader, so its pid is its pgid). A stale pid just ESRCHes.
+                // Ungated by the writer lock — see the fn doc.
                 // SAFETY: kill on a pgid is always memory-safe.
                 unsafe {
                     libc::kill(-shared.child_pid, sig);

@@ -606,6 +606,12 @@ impl Compute for LocalCompute {
 /// `send`/`spawn` write `Input` frames, `capture` renders the byte-exact ring,
 /// `observe_stream` is the live exact channel, `interrupt` is `C-c` (`0x03`),
 /// and `kill` is a `Signal` control frame — no `tmux` on this path.
+///
+/// Roles (M2a, design §6): the resident `observe_stream` and `capture` dial as
+/// **readers** so they never contend for the writer; the input-bearing verbs
+/// (`send`/`spawn`/`interrupt`) take the single **writer** lock momentarily and
+/// fail honestly if a human interactive attacher holds it. `kill`'s `Signal` is
+/// ungated, so a reader connection stops a session even under a human writer.
 struct HolderCompute {
     dev: LocalTmux,
     handle: serde_json::Value,
@@ -619,8 +625,18 @@ impl HolderCompute {
             .ok_or_else(|| anyhow!("handle has no 'holderSock': {}", self.handle))
     }
 
+    /// A reader connection — the read-only role (`capture`, `observe_stream`,
+    /// and the ungated `kill` control frame). Never contends for the writer.
     fn connect(&self) -> anyhow::Result<disponent_hold::Client> {
         disponent_hold::Client::connect(&self.sock()?)
+    }
+
+    /// A momentary **writer** connection for input-bearing verbs (`send`,
+    /// `spawn`, `interrupt`). Errors honestly if a human interactive attacher
+    /// holds the writer lock ("writer channel held by an interactive
+    /// attacher") — the design's reject-with-reason rule, not a silent drop.
+    fn connect_writer(&self) -> anyhow::Result<disponent_hold::Client> {
+        disponent_hold::Client::connect_writer(&self.sock()?)
     }
 
     /// The agent's working directory (`<workDir>/task`), for one-shot `run`.
@@ -637,7 +653,9 @@ impl HolderCompute {
         }
         let mut bytes = line.as_bytes().to_vec();
         bytes.push(b'\n');
-        self.connect()?.send_input(&bytes)
+        // Take the writer lock momentarily; it releases when this connection
+        // drops. Fails honestly if a human holds it.
+        self.connect_writer()?.send_input(&bytes)
     }
 }
 
@@ -716,7 +734,9 @@ impl Compute for HolderCompute {
             return Ok(());
         }
         // C-c (0x03) on the pty; the held shell survives, the work dir untouched.
-        self.connect()?.interrupt()
+        // Typing C-c is a writer act — take the lock momentarily (fails honestly
+        // if a human holds it).
+        self.connect_writer()?.interrupt()
     }
 
     fn kill(&self) -> anyhow::Result<()> {
@@ -725,7 +745,9 @@ impl Compute for HolderCompute {
         }
         // SIGKILL the child's process group via the holder control frame — the
         // holder itself lingers until reaped (design §5), same as a tmux pane's
-        // shell surviving `kill-session`'s target process.
+        // shell surviving `kill-session`'s target process. `Signal` is ungated
+        // by the writer lock, so kill works even while a human holds the writer;
+        // a plain reader connection suffices.
         self.connect()?.kill()
     }
 
@@ -1027,6 +1049,47 @@ mod tests {
         });
         assert!(got, "kill must end the child and surface its exit");
         assert_eq!(signal, Some(9), "SIGKILL death → signal 9");
+        drop(holder);
+    }
+
+    #[test]
+    fn holder_send_takes_the_writer_and_fails_when_a_human_holds_it() {
+        let dir = scratch_dir();
+        // The child echoes the one line it reads, so a successful send is
+        // observable.
+        let holder = start_holder("wsend", r#"read x; echo "got:[$x]"; sleep 2; exit 0"#, &dir);
+        let c = holder_compute(&dir, "wsend");
+        let sock = dir.join("wsend.sock");
+
+        // With no human writer, send takes the writer momentarily and reaches
+        // the child.
+        let stream = c.observe_stream().unwrap().unwrap(); // a resident reader
+        c.send("hello").unwrap();
+        let mut acc = String::new();
+        let saw = drive(&stream, 5, |o| {
+            if o.kind == "raw" {
+                acc.push_str(o.payload["payload"]["data"].as_str().unwrap_or(""));
+            }
+            acc.contains("got:[hello]")
+        });
+        assert!(
+            saw,
+            "send must reach the child when no writer is held (got {acc:?})"
+        );
+
+        // Now a human-style interactive attacher holds the writer lock.
+        let human = disponent_hold::Client::connect_writer(&sock).unwrap();
+        assert_eq!(human.granted_role(), disponent_hold::Role::Writer);
+
+        // send must now fail honestly rather than silently drop.
+        let err = c.send("world").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("writer channel held"),
+            "send must reject with a clear reason when a human holds the writer, got {msg:?}"
+        );
+
+        drop(human);
         drop(holder);
     }
 }

@@ -1,13 +1,15 @@
 //! The attach client: dial a holder's socket, then either drive it
 //! programmatically ([`Client`], used by the engine/pm/tests) or run the
-//! interactive terminal loop ([`attach`], the `disponent hold-attach` CLI).
+//! interactive terminal loop ([`attach`], the `disponent attach` CLI).
 //!
-//! [`attach`] is the precursor to M2's full `attach` op. It puts the local tty
-//! in raw mode behind an RAII guard that restores it on **every** return path
-//! (the lesson from shpool's `tty.rs` — forget it and the human's terminal
-//! wedges), forwards stdin as `Input` frames, tracks `SIGWINCH` into `Resize`
-//! frames, prints `Data` to stdout, and exits propagating the child's code when
-//! the `Exit` frame arrives.
+//! [`attach`] is **reader-default** (design §6): it streams the session's output
+//! to stdout but does NOT forward your stdin. Pass `write = true` to request the
+//! single writer lock; when granted it puts the local tty in raw mode behind an
+//! RAII guard that restores it on **every** return path (the lesson from
+//! shpool's `tty.rs` — forget it and the human's terminal wedges), forwards
+//! stdin as `Input` frames, and tracks `SIGWINCH` into `Resize` frames. When the
+//! writer is already held it prints a notice and stays read-only. Either way it
+//! exits propagating the child's code when the `Exit` frame arrives.
 
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
@@ -18,30 +20,78 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 
 use crate::protocol::{
-    encode_client, encode_resize, encode_signal, read_handshake, read_server_frame, ClientKind,
-    Exit, ServerFrame,
+    encode_client, encode_resize, encode_signal, read_handshake_reply, read_server_frame,
+    write_role_request, ClientKind, Exit, Role, ServerFrame,
 };
 use crate::server::socket_path;
 
-/// A programmatic attach client: the handshake is consumed on connect, then
-/// frames flow. Cloneable read/write halves let a caller read `Data` on one
+/// A programmatic attach client: the role handshake is exchanged on connect,
+/// then frames flow. Cloneable read/write halves let a caller read `Data` on one
 /// thread and send `Input` on another.
 pub struct Client {
     stream: UnixStream,
+    role: Role,
+    writer_busy: bool,
 }
 
 impl Client {
-    /// Connect to a holder socket by path, consuming the handshake.
+    /// Connect to a holder socket by path as a **reader** (the default,
+    /// read-only role), exchanging the handshake.
     pub fn connect(path: &Path) -> Result<Client> {
-        let mut stream =
-            UnixStream::connect(path).with_context(|| format!("connect {}", path.display()))?;
-        read_handshake(&mut stream).context("read handshake")?;
-        Ok(Client { stream })
+        Client::connect_as(path, Role::Reader)
     }
 
-    /// Connect by uid, resolving the socket the same way the holder does.
+    /// Connect requesting `role`, exchanging the handshake. A denied Writer is
+    /// admitted read-only — inspect [`Client::granted_role`] /
+    /// [`Client::writer_busy`] (this does not error on denial;
+    /// [`Client::connect_writer`] does).
+    pub fn connect_as(path: &Path, role: Role) -> Result<Client> {
+        let mut stream =
+            UnixStream::connect(path).with_context(|| format!("connect {}", path.display()))?;
+        write_role_request(&mut stream, role).context("send role request")?;
+        let reply = read_handshake_reply(&mut stream).context("read handshake")?;
+        Ok(Client {
+            stream,
+            role: reply.role,
+            writer_busy: reply.writer_busy,
+        })
+    }
+
+    /// Connect requesting the single **writer** lock, erroring if a writer
+    /// already holds it — the honest reject the engine's `send` surfaces
+    /// ("writer channel held by an interactive attacher").
+    pub fn connect_writer(path: &Path) -> Result<Client> {
+        let c = Client::connect_as(path, Role::Writer)?;
+        if c.role != Role::Writer {
+            anyhow::bail!("writer channel held by an interactive attacher");
+        }
+        Ok(c)
+    }
+
+    /// Connect by uid as a reader, resolving the socket the same way the holder
+    /// does.
     pub fn connect_uid(socket_dir: Option<&Path>, uid: &str) -> Result<Client> {
         Client::connect(&socket_path(socket_dir, uid))
+    }
+
+    /// Connect by uid requesting `role` (a denied Writer is admitted read-only).
+    pub fn connect_uid_as(socket_dir: Option<&Path>, uid: &str, role: Role) -> Result<Client> {
+        Client::connect_as(&socket_path(socket_dir, uid), role)
+    }
+
+    /// Connect by uid requesting the writer lock, erroring if it is held.
+    pub fn connect_writer_uid(socket_dir: Option<&Path>, uid: &str) -> Result<Client> {
+        Client::connect_writer(&socket_path(socket_dir, uid))
+    }
+
+    /// The role the holder actually granted (a denied Writer reads as Reader).
+    pub fn granted_role(&self) -> Role {
+        self.role
+    }
+
+    /// True iff this client asked for Writer but was admitted read-only.
+    pub fn writer_busy(&self) -> bool {
+        self.writer_busy
     }
 
     /// Read the next server frame, or `None` at a clean EOF.
@@ -98,10 +148,12 @@ impl Client {
         Ok(())
     }
 
-    /// A cloned handle over the same connection.
+    /// A cloned handle over the same connection (same granted role).
     pub fn try_clone(&self) -> Result<Client> {
         Ok(Client {
             stream: self.stream.try_clone()?,
+            role: self.role,
+            writer_busy: self.writer_busy,
         })
     }
 
@@ -225,58 +277,79 @@ fn win_size(fd: RawFd) -> Option<(u16, u16)> {
 }
 
 /// Run the interactive attach loop against a holder socket, returning the
-/// process exit code to propagate. Restores the terminal before returning.
-pub fn attach(socket_dir: Option<&Path>, uid: &str) -> Result<i32> {
-    let client = Client::connect_uid(socket_dir, uid)?;
+/// process exit code to propagate. Reader-default (design §6): with
+/// `write = false` it only streams output. With `write = true` it requests the
+/// writer lock and, when granted, forwards stdin + `SIGWINCH`; when the writer
+/// is already held it prints a notice and stays read-only. Restores the terminal
+/// before returning on every path.
+pub fn attach(socket_dir: Option<&Path>, uid: &str, write: bool) -> Result<i32> {
+    let role = if write { Role::Writer } else { Role::Reader };
+    let client = Client::connect_uid_as(socket_dir, uid, role)?;
+    let holding_writer = client.granted_role() == Role::Writer;
+    if write && !holding_writer {
+        eprintln!(
+            "disponent: the writer channel is held by another attacher — \
+             attached read-only (output only)."
+        );
+    }
     let stdin_fd = io::stdin().as_raw_fd();
     let stdout_fd = io::stdout().as_raw_fd();
 
-    // Raw mode with guaranteed restore (dropped when this fn returns).
-    let _guard = RawGuard::enter(stdin_fd).context("enter raw mode")?;
+    // Raw mode with guaranteed restore (dropped when this fn returns). Only the
+    // writer drives the tty, so a reader leaves the terminal cooked.
+    let _guard = if holding_writer {
+        Some(RawGuard::enter(stdin_fd).context("enter raw mode")?)
+    } else {
+        None
+    };
 
-    // Install the SIGWINCH handler.
-    // SAFETY: registering a static extern "C" handler for SIGWINCH.
-    unsafe {
-        libc::signal(libc::SIGWINCH, on_winch as *const () as usize);
-    }
+    // Forward stdin + resizes only while holding the writer — a reader's
+    // keystrokes are not forwarded, and the holder would ignore them anyway.
+    if holding_writer {
+        // Install the SIGWINCH handler.
+        // SAFETY: registering a static extern "C" handler for SIGWINCH.
+        unsafe {
+            libc::signal(libc::SIGWINCH, on_winch as *const () as usize);
+        }
 
-    // Send the initial size so the child matches this terminal immediately.
-    let mut writer = client.try_clone()?;
-    if let Some((cols, rows)) = win_size(stdout_fd) {
-        let _ = writer.send_resize(cols, rows);
-    }
+        // Send the initial size so the child matches this terminal immediately.
+        let mut writer = client.try_clone()?;
+        if let Some((cols, rows)) = win_size(stdout_fd) {
+            let _ = writer.send_resize(cols, rows);
+        }
 
-    // stdin → Input frames (background; dies with the process on exit).
-    {
-        let mut input = client.try_clone()?;
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            let mut stdin = io::stdin();
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if input.send_input(&buf[..n]).is_err() {
-                            break;
+        // stdin → Input frames (background; dies with the process on exit).
+        {
+            let mut input = client.try_clone()?;
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let mut stdin = io::stdin();
+                loop {
+                    match stdin.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if input.send_input(&buf[..n]).is_err() {
+                                break;
+                            }
                         }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
-            }
-        });
-    }
+            });
+        }
 
-    // SIGWINCH → Resize frames (background).
-    {
-        let mut resizer = writer.try_clone()?;
-        std::thread::spawn(move || loop {
-            if WINCH.swap(false, Ordering::SeqCst) {
-                if let Some((cols, rows)) = win_size(stdout_fd) {
-                    let _ = resizer.send_resize(cols, rows);
+        // SIGWINCH → Resize frames (background).
+        {
+            let mut resizer = writer.try_clone()?;
+            std::thread::spawn(move || loop {
+                if WINCH.swap(false, Ordering::SeqCst) {
+                    if let Some((cols, rows)) = win_size(stdout_fd) {
+                        let _ = resizer.send_resize(cols, rows);
+                    }
                 }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        });
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            });
+        }
     }
 
     // Output loop (this thread): Data → stdout, exit on the Exit frame.
