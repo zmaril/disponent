@@ -27,6 +27,7 @@ pub trait PollStream<T>: Send + Sync {
 pub enum EnvKind {
     Local,
     ExeDev,
+    Modal,
     ClaudeCodeWeb,
     Custom,
 }
@@ -35,11 +36,10 @@ impl EnvKind {
         match s.to_ascii_lowercase().as_str() {
             "local" => Ok(Self::Local),
             "exe_dev" => Ok(Self::ExeDev),
+            "modal" => Ok(Self::Modal),
             "claude_code_web" => Ok(Self::ClaudeCodeWeb),
             "custom" => Ok(Self::Custom),
-            other => Err(anyhow::anyhow!(
-                "unknown EnvKind: {other} (expected local | exe_dev | claude_code_web | custom)"
-            )),
+            other => Err(anyhow::anyhow!("unknown EnvKind: {other} (expected local | exe_dev | modal | claude_code_web | custom)"))
         }
     }
 }
@@ -48,6 +48,7 @@ impl EnvKind {
         match self {
             Self::Local => "local",
             Self::ExeDev => "exe_dev",
+            Self::Modal => "modal",
             Self::ClaudeCodeWeb => "claude_code_web",
             Self::Custom => "custom",
         }

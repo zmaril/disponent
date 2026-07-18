@@ -28,6 +28,7 @@ pub trait PollStream<T>: Send + Sync {
 pub enum EnvKind {
     Local,
     ExeDev,
+    Modal,
     ClaudeCodeWeb,
     Custom,
 }

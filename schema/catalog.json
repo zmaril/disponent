@@ -2,7 +2,7 @@
   "fluessig": {
     "format": 1,
     "emitter": "0.0.0",
-    "compiler": "1.13.0"
+    "compiler": "1.14.0"
   },
   "source": "disponent.tsp",
   "scalars": [
@@ -100,6 +100,9 @@
         },
         {
           "name": "exe_dev"
+        },
+        {
+          "name": "modal"
         },
         {
           "name": "claude_code_web"

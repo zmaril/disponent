@@ -32,6 +32,8 @@ pub enum EnvKind {
     Local,
     #[napi(value = "exe_dev")]
     ExeDev,
+    #[napi(value = "modal")]
+    Modal,
     #[napi(value = "claude_code_web")]
     ClaudeCodeWeb,
     #[napi(value = "custom")]

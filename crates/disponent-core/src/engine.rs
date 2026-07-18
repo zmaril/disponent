@@ -29,6 +29,7 @@ use crate::mcp_generated::{
     DispatchSpec, DriverPlanOptions, EnvCapability, Environment, Event, EventOptions, Offering,
     ReconcileReport, Session, SessionFilter, Statement, WorkspaceLink,
 };
+use crate::modal::Modal;
 use crate::observe::{self, Observation};
 use crate::schema_gen::{TableSchema, DUCKDB_TABLES, PG_TABLES, SQLITE_TABLES};
 use crate::sink::Sink;
@@ -169,6 +170,7 @@ impl Engine {
             vec![
                 Arc::new(ExeDev::from_env()),
                 Arc::new(LocalTmux::from_env()),
+                Arc::new(Modal::from_env()),
             ],
         )?;
         if let Ok(port) = std::env::var("DISPONENT_OTEL_PORT") {

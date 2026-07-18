@@ -18,6 +18,7 @@ scalar Cents extends int64;
 enum EnvKind {
   local,
   exe_dev,
+  modal,
   claude_code_web,
   custom,
 }

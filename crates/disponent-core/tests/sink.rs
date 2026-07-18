@@ -33,11 +33,11 @@ fn sqlite_mirror_tracks_the_ledger() {
     let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
 
     // the shipped catalog seeded (idempotently — reopen below re-seeds)
-    assert_eq!(count("SELECT count(*) FROM environments"), 2);
-    assert_eq!(count("SELECT count(*) FROM offerings"), 6);
+    assert_eq!(count("SELECT count(*) FROM environments"), 3);
+    assert_eq!(count("SELECT count(*) FROM offerings"), 9);
     assert_eq!(
         count("SELECT count(*) FROM offerings WHERE is_default = 1"),
-        2
+        3
     );
     assert!(count("SELECT count(*) FROM env_capabilities") > 0);
 
@@ -71,8 +71,8 @@ fn sqlite_mirror_tracks_the_ledger() {
     let _engine = Engine::open(Some(path.to_str().unwrap())).unwrap();
     let conn = rusqlite::Connection::open(&path).unwrap();
     let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-    assert_eq!(count("SELECT count(*) FROM environments"), 2);
-    assert_eq!(count("SELECT count(*) FROM env_capabilities"), 15);
+    assert_eq!(count("SELECT count(*) FROM environments"), 3);
+    assert_eq!(count("SELECT count(*) FROM env_capabilities"), 23);
 
     let _ = std::fs::remove_file(&path);
 }
