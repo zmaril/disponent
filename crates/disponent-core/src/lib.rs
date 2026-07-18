@@ -13,6 +13,7 @@ pub mod detectors;
 pub mod engine;
 pub mod local;
 pub mod mcp_generated;
+pub mod modal;
 pub mod observe;
 pub mod otel;
 pub mod schema_gen;

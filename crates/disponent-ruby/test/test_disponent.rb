@@ -22,7 +22,7 @@ class TestDisponent < Minitest::Test
   def test_whole_lifecycle
     d = open
     envs = d.environments
-    assert_equal ["local", "exe-dev"], envs.map(&:slug)
+    assert_equal ["local", "exe-dev", "modal"], envs.map(&:slug)
     assert_equal "local", envs[0].kind # enum crosses as its wire string
 
     # per-env capabilities: one row per (env, capability); capability crosses as

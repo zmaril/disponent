@@ -102,6 +102,9 @@
           "name": "exe_dev"
         },
         {
+          "name": "modal"
+        },
+        {
           "name": "claude_code_web"
         },
         {

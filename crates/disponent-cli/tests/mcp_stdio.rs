@@ -117,7 +117,7 @@ fn supervisor_walks_the_whole_flow() {
         .iter()
         .map(|e| e["slug"].as_str().unwrap())
         .collect();
-    assert_eq!(slugs, ["local", "exe-dev"], "the shipped catalog");
+    assert_eq!(slugs, ["local", "exe-dev", "modal"], "the shipped catalog");
 
     // the offerings table: env × agent × model, one row flagged default per env
     let (offerings, err) = server.call("disponent_offerings", json!({}));
@@ -131,8 +131,8 @@ fn supervisor_walks_the_whole_flow() {
         rows.iter()
             .filter(|o| o["isDefault"] == json!(true))
             .count(),
-        2,
-        "one default per environment (local, exe-dev)"
+        3,
+        "one default per environment (local, exe-dev, modal)"
     );
 
     // per-env capabilities: one row per (env, capability) the catalog advertises

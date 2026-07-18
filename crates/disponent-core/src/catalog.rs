@@ -60,6 +60,24 @@ pub const OFFERINGS: &[Offering] = &[
         model: "claude-haiku-4-5",
         is_default: false,
     },
+    Offering {
+        env: "modal",
+        agent: "claude-code",
+        model: "claude-opus-4-8",
+        is_default: true,
+    },
+    Offering {
+        env: "modal",
+        agent: "claude-code",
+        model: "claude-sonnet-5",
+        is_default: false,
+    },
+    Offering {
+        env: "modal",
+        agent: "claude-code",
+        model: "claude-haiku-4-5",
+        is_default: false,
+    },
 ];
 
 pub const CAPABILITIES: &[EnvCapabilities] = &[
@@ -88,6 +106,26 @@ pub const CAPABILITIES: &[EnvCapabilities] = &[
             "templates",
         ],
     },
+    EnvCapabilities {
+        env: "modal",
+        // A container sandbox (Modal Image → Sandbox), so `isolation_container`
+        // rather than exe.dev's `isolation_vm`; templated by the image. The
+        // honest workspace link (the encrypted tunnel URL) is surfaced via the
+        // `workspaceLink` op — the closed CapabilityKind vocabulary has no bit
+        // for it, so it isn't listed here (it lives in the op, not a faked
+        // capability). Observation stays poll-grade (tmux-scraped) until the
+        // holder binary lands.
+        capabilities: &[
+            "dispatch",
+            "interact",
+            "observe_poll",
+            "list_sessions",
+            "cancel",
+            "teardown",
+            "isolation_container",
+            "templates",
+        ],
+    },
 ];
 
 /// The baseline environment rows (as the MCP-surface DTO — the flat shape).
@@ -105,6 +143,13 @@ pub fn environments() -> Vec<Environment> {
             kind: "exe_dev".into(),
             display_name: Some("exe.dev VMs".into()),
             endpoint: Some("ssh://exe.dev".into()),
+            last_probed_at: None,
+        },
+        Environment {
+            slug: "modal".into(),
+            kind: "modal".into(),
+            display_name: Some("Modal sandboxes".into()),
+            endpoint: Some("https://modal.com".into()),
             last_probed_at: None,
         },
     ]
