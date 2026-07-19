@@ -18,6 +18,10 @@ use disponent_core::mcp_generated::{self as mcp, DisponentMcp};
 use disponent_core::Engine;
 
 use crate::generated::*;
+// The shared streaming contract (`Poll`/`PollStream`) the poll-stream dressings
+// below reference bare; generated.rs imports it privately from the fluessig-runtime
+// crate, so the glob above doesn't re-export it — bring it into scope explicitly.
+use fluessig_runtime::{Poll, PollStream};
 
 /// wire string ↔ binding enum, one macro per vocabulary (the enums are the
 /// generated numeric enums; the engine stores the tsp wire strings).

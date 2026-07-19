@@ -1,8 +1,7 @@
 {
   "fluessig": {
     "format": 1,
-    "emitter": "0.0.0",
-    "compiler": "1.14.0"
+    "emitter": "fluessig-derive/0"
   },
   "source": "disponent.tsp",
   "scalars": [
@@ -380,7 +379,7 @@
           "nullable": false
         },
         {
-          "name": "displayName",
+          "name": "display_name",
           "type": {
             "k": "scalar",
             "name": "string"
@@ -396,6 +395,14 @@
           },
           "nullable": true,
           "doc": "Address only — never a credential (secrets live in config/templates)."
+        },
+        {
+          "name": "last_probed_at",
+          "type": {
+            "k": "scalar",
+            "name": "utcDateTime"
+          },
+          "nullable": true
         },
         {
           "name": "capabilities",
@@ -415,19 +422,13 @@
             "kind": "association",
             "properties": "CapabilityDetail",
             "table": "env_capabilities",
-            "fkColumns": null,
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            "fkColumns": [
+              "capability"
+            ],
+            "sourceColumns": [
+              "slug"
+            ]
           }
-        },
-        {
-          "name": "lastProbedAt",
-          "type": {
-            "k": "scalar",
-            "name": "utcDateTime"
-          },
-          "nullable": true
         }
       ]
     },
@@ -569,14 +570,14 @@
       "name": "Offering",
       "table": "offerings",
       "key": [
-        "env",
-        "agent",
-        "model"
+        "env_slug",
+        "agent_name",
+        "model_id"
       ],
       "doc": "env × agent × model availability (from the shipped catalog + config).",
       "fields": [
         {
-          "name": "env",
+          "name": "env_slug",
           "type": {
             "k": "ref",
             "name": "Environment",
@@ -588,17 +589,13 @@
             "to": "Environment",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "env_slug"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "agent",
+          "name": "agent_name",
           "type": {
             "k": "ref",
             "name": "Agent",
@@ -610,17 +607,13 @@
             "to": "Agent",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "agent_name"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "model",
+          "name": "model_id",
           "type": {
             "k": "ref",
             "name": "AgentModel",
@@ -632,17 +625,13 @@
             "to": "AgentModel",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "model_id"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "isDefault",
+          "name": "is_default",
           "type": {
             "k": "scalar",
             "name": "boolean"
@@ -670,7 +659,7 @@
           "key": true
         },
         {
-          "name": "createdAt",
+          "name": "created_at",
           "type": {
             "k": "scalar",
             "name": "utcDateTime"
@@ -704,7 +693,7 @@
           "doc": "Workspace: URL or local path; empty = no repo (pure-prompt work)."
         },
         {
-          "name": "gitRef",
+          "name": "git_ref",
           "type": {
             "k": "scalar",
             "name": "string"
@@ -720,7 +709,7 @@
           "nullable": false
         },
         {
-          "name": "fetchRemote",
+          "name": "fetch_remote",
           "type": {
             "k": "scalar",
             "name": "boolean"
@@ -729,7 +718,7 @@
           "doc": "Fetch gitRef from the workspace's origin and cut the worktree off it,\nrather than off local HEAD."
         },
         {
-          "name": "template",
+          "name": "template_name",
           "type": {
             "k": "ref",
             "name": "Template",
@@ -740,13 +729,9 @@
             "to": "Template",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "template_name"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
@@ -759,7 +744,7 @@
           "doc": "Per-dispatch setup script — runs after the template's setup and the repo clone."
         },
         {
-          "name": "env",
+          "name": "env_slug",
           "type": {
             "k": "ref",
             "name": "Environment",
@@ -770,17 +755,13 @@
             "to": "Environment",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "env_slug"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "agent",
+          "name": "agent_name",
           "type": {
             "k": "ref",
             "name": "Agent",
@@ -791,17 +772,13 @@
             "to": "Agent",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "agent_name"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "model",
+          "name": "model_id",
           "type": {
             "k": "ref",
             "name": "AgentModel",
@@ -812,17 +789,13 @@
             "to": "AgentModel",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "model_id"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "timeoutSecs",
+          "name": "timeout_secs",
           "type": {
             "k": "scalar",
             "name": "int32",
@@ -831,7 +804,7 @@
           "nullable": true
         },
         {
-          "name": "maxBudget",
+          "name": "max_budget",
           "type": {
             "k": "scalar",
             "name": "Cents",
@@ -840,7 +813,7 @@
           "nullable": true
         },
         {
-          "name": "viaMcpDepth",
+          "name": "via_mcp_depth",
           "type": {
             "k": "scalar",
             "name": "int32",
@@ -892,7 +865,7 @@
           "key": true
         },
         {
-          "name": "dispatch",
+          "name": "dispatch_id",
           "type": {
             "k": "ref",
             "name": "Dispatch",
@@ -903,13 +876,9 @@
             "to": "Dispatch",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "dispatch_id"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
@@ -921,7 +890,7 @@
           "nullable": false
         },
         {
-          "name": "envHandle",
+          "name": "env_handle",
           "type": {
             "k": "scalar",
             "name": "Json",
@@ -931,7 +900,7 @@
           "doc": "The env's own handle(s): tmux session name, VM name, web session id/url."
         },
         {
-          "name": "attachTmuxSocket",
+          "name": "attach_tmux_socket",
           "type": {
             "k": "scalar",
             "name": "string"
@@ -940,7 +909,7 @@
           "doc": "The tmux server socket an external terminal can attach to when the env\nruns the agent in a reachable local multiplexer (the local tmux path);\npairs with attachTmuxSession. Both null for web/ttyd-only envs (exe.dev)\nand for the local holder path, whose terminal is reached differently. Two\nflat scalars rather than a nested object, to sidestep a fluessig\nMagnus-emitter gap for nested returned structs."
         },
         {
-          "name": "attachTmuxSession",
+          "name": "attach_tmux_session",
           "type": {
             "k": "scalar",
             "name": "string"
@@ -959,7 +928,7 @@
           "doc": "Human-facing view URL when the env has one (ttyd, web session page)."
         },
         {
-          "name": "resumedFrom",
+          "name": "resumed_from",
           "type": {
             "k": "ref",
             "name": "Session",
@@ -970,17 +939,13 @@
             "to": "Session",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "resumed_from"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "startedAt",
+          "name": "started_at",
           "type": {
             "k": "scalar",
             "name": "utcDateTime"
@@ -988,7 +953,7 @@
           "nullable": true
         },
         {
-          "name": "endedAt",
+          "name": "ended_at",
           "type": {
             "k": "scalar",
             "name": "utcDateTime"
@@ -996,7 +961,7 @@
           "nullable": true
         },
         {
-          "name": "exitReason",
+          "name": "exit_reason",
           "type": {
             "k": "enum",
             "name": "ExitReason"
@@ -1004,7 +969,7 @@
           "nullable": true
         },
         {
-          "name": "exitDetail",
+          "name": "exit_detail",
           "type": {
             "k": "scalar",
             "name": "string"
@@ -1012,7 +977,7 @@
           "nullable": true
         },
         {
-          "name": "reapedAt",
+          "name": "reaped_at",
           "type": {
             "k": "scalar",
             "name": "utcDateTime"
@@ -1026,13 +991,13 @@
       "name": "Event",
       "table": "events",
       "key": [
-        "session",
+        "session_uid",
         "idx"
       ],
       "doc": "One observation on a session's timeline (containment rides the key: the\nsession FK + the position, like Artifact/Usage — to-manys are queries).",
       "fields": [
         {
-          "name": "session",
+          "name": "session_uid",
           "type": {
             "k": "ref",
             "name": "Session",
@@ -1044,13 +1009,9 @@
             "to": "Session",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "session_uid"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
@@ -1101,13 +1062,13 @@
       "name": "Artifact",
       "table": "artifacts",
       "key": [
-        "session",
+        "session_uid",
         "idx"
       ],
       "doc": "Something the session produced.",
       "fields": [
         {
-          "name": "session",
+          "name": "session_uid",
           "type": {
             "k": "ref",
             "name": "Session",
@@ -1119,13 +1080,9 @@
             "to": "Session",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "session_uid"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
@@ -1170,13 +1127,13 @@
       "name": "Usage",
       "table": "usage",
       "key": [
-        "session",
-        "model"
+        "session_uid",
+        "model_id"
       ],
       "doc": "Best-effort accounting, per session per model.",
       "fields": [
         {
-          "name": "session",
+          "name": "session_uid",
           "type": {
             "k": "ref",
             "name": "Session",
@@ -1188,17 +1145,13 @@
             "to": "Session",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "session_uid"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "model",
+          "name": "model_id",
           "type": {
             "k": "ref",
             "name": "AgentModel",
@@ -1210,17 +1163,13 @@
             "to": "AgentModel",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "model_id"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "inputTokens",
+          "name": "input_tokens",
           "type": {
             "k": "scalar",
             "name": "int64",
@@ -1229,7 +1178,7 @@
           "nullable": false
         },
         {
-          "name": "outputTokens",
+          "name": "output_tokens",
           "type": {
             "k": "scalar",
             "name": "int64",
@@ -1238,7 +1187,7 @@
           "nullable": false
         },
         {
-          "name": "costCents",
+          "name": "cost_cents",
           "type": {
             "k": "scalar",
             "name": "Cents",
@@ -1267,7 +1216,7 @@
           "key": true
         },
         {
-          "name": "createdAt",
+          "name": "created_at",
           "type": {
             "k": "scalar",
             "name": "utcDateTime"
@@ -1291,7 +1240,7 @@
           "nullable": false
         },
         {
-          "name": "session",
+          "name": "session_uid",
           "type": {
             "k": "ref",
             "name": "Session",
@@ -1303,13 +1252,9 @@
             "to": "Session",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "session_uid"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
@@ -1322,7 +1267,7 @@
           "doc": "The payload — free-form text, like the brief. Structure is the consumer's."
         },
         {
-          "name": "inReplyTo",
+          "name": "in_reply_to",
           "type": {
             "k": "ref",
             "name": "Message",
@@ -1334,17 +1279,13 @@
             "to": "Message",
             "cardinality": "one",
             "kind": "association",
-            "properties": null,
             "fkColumns": [
               "in_reply_to"
-            ],
-            "typeColumn": null,
-            "sourceColumns": null,
-            "sourceTypeColumn": null
+            ]
           }
         },
         {
-          "name": "fanoutId",
+          "name": "fanout_id",
           "type": {
             "k": "scalar",
             "name": "FanoutId",
@@ -1363,7 +1304,7 @@
           "doc": "Supersession key. A newer fan-out carrying the same `topic` supersedes\nolder same-topic messages in an inbox: a reader acts on the LATEST message\nper (recipient, topic) and skips the stale ones. Null = standalone."
         },
         {
-          "name": "ackedAt",
+          "name": "acked_at",
           "type": {
             "k": "scalar",
             "name": "utcDateTime"
@@ -1377,6 +1318,7 @@
   "relationProperties": [
     {
       "name": "CapabilityDetail",
+      "doc": "What this env can do (closed vocabulary; open detail).",
       "fields": [
         {
           "name": "detail",
@@ -1502,7 +1444,7 @@
       "name": "UsageDelta",
       "fields": [
         {
-          "name": "modelId",
+          "name": "model_id",
           "type": {
             "k": "scalar",
             "name": "string"
@@ -1510,7 +1452,7 @@
           "nullable": true
         },
         {
-          "name": "inputTokens",
+          "name": "input_tokens",
           "type": {
             "k": "scalar",
             "name": "int64",
@@ -1519,7 +1461,7 @@
           "nullable": true
         },
         {
-          "name": "outputTokens",
+          "name": "output_tokens",
           "type": {
             "k": "scalar",
             "name": "int64",
@@ -1528,7 +1470,7 @@
           "nullable": true
         },
         {
-          "name": "costCents",
+          "name": "cost_cents",
           "type": {
             "k": "scalar",
             "name": "Cents",
@@ -1542,7 +1484,7 @@
       "name": "ArtifactRef",
       "fields": [
         {
-          "name": "artifactIdx",
+          "name": "artifact_idx",
           "type": {
             "k": "scalar",
             "name": "int64",
@@ -1579,7 +1521,7 @@
       "doc": "Pointer + the fields a reader needs to triage a `mail` event without\nfetching the Message: direction (sender/recipient), the fan-out it belongs\nto, and its topic (so a reader can group by topic for latest-wins).",
       "fields": [
         {
-          "name": "messageId",
+          "name": "message_id",
           "type": {
             "k": "scalar",
             "name": "MessageId",
@@ -1604,7 +1546,7 @@
           "nullable": false
         },
         {
-          "name": "fanoutId",
+          "name": "fanout_id",
           "type": {
             "k": "scalar",
             "name": "FanoutId",
@@ -1626,7 +1568,7 @@
       "name": "OpenOptions",
       "fields": [
         {
-          "name": "configPath",
+          "name": "config_path",
           "type": {
             "k": "scalar",
             "name": "string"
@@ -1696,7 +1638,7 @@
           "nullable": true
         },
         {
-          "name": "gitRef",
+          "name": "git_ref",
           "type": {
             "k": "scalar",
             "name": "string"
@@ -1712,7 +1654,7 @@
           "nullable": true
         },
         {
-          "name": "fetchRemote",
+          "name": "fetch_remote",
           "type": {
             "k": "scalar",
             "name": "boolean"
@@ -1739,7 +1681,7 @@
           "doc": "Per-dispatch setup script. No secrets — those live in the template."
         },
         {
-          "name": "timeoutSecs",
+          "name": "timeout_secs",
           "type": {
             "k": "scalar",
             "name": "int32",
@@ -1748,7 +1690,7 @@
           "nullable": true
         },
         {
-          "name": "maxBudget",
+          "name": "max_budget",
           "type": {
             "k": "scalar",
             "name": "Cents",
@@ -1808,7 +1750,7 @@
           "nullable": true
         },
         {
-          "name": "dispatchId",
+          "name": "dispatch_id",
           "type": {
             "k": "scalar",
             "name": "DispatchId",
@@ -1823,7 +1765,7 @@
       "doc": "An editor link into a session's working directory.",
       "fields": [
         {
-          "name": "sessionUid",
+          "name": "session_uid",
           "type": {
             "k": "scalar",
             "name": "SessionUid",
@@ -1866,7 +1808,7 @@
       "name": "EventOptions",
       "fields": [
         {
-          "name": "sessionUid",
+          "name": "session_uid",
           "type": {
             "k": "scalar",
             "name": "SessionUid",
@@ -1875,7 +1817,7 @@
           "nullable": true
         },
         {
-          "name": "afterIdx",
+          "name": "after_idx",
           "type": {
             "k": "scalar",
             "name": "int64",
@@ -1942,7 +1884,7 @@
       "doc": "Filter for the `messages` read. Absent fields don't constrain.",
       "fields": [
         {
-          "name": "fanoutId",
+          "name": "fanout_id",
           "type": {
             "k": "scalar",
             "name": "FanoutId",
@@ -1961,7 +1903,7 @@
           "doc": "Only messages addressed to this party (inbox scoping)."
         },
         {
-          "name": "sessionUid",
+          "name": "session_uid",
           "type": {
             "k": "scalar",
             "name": "SessionUid",
@@ -1980,7 +1922,7 @@
           "doc": "Only messages carrying this topic."
         },
         {
-          "name": "latestPerTopic",
+          "name": "latest_per_topic",
           "type": {
             "k": "scalar",
             "name": "boolean"
@@ -2021,7 +1963,7 @@
           "nullable": false
         },
         {
-          "name": "tornDown",
+          "name": "torn_down",
           "type": {
             "k": "scalar",
             "name": "int32",
@@ -2053,7 +1995,7 @@
           "doc": "Surface scope: supervisor = full; worker = observe-only. Default supervisor."
         },
         {
-          "name": "maxDepth",
+          "name": "max_depth",
           "type": {
             "k": "scalar",
             "name": "int32",
@@ -2115,7 +2057,7 @@
       "doc": "What an environment can do: one row per (env, capability) the catalog\nadvertises. Mirrors the env_capabilities edge as a flat, returnable value\nstruct (the closed CapabilityKind vocabulary, plus open detail).",
       "fields": [
         {
-          "name": "envSlug",
+          "name": "env_slug",
           "type": {
             "k": "scalar",
             "name": "string"

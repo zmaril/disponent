@@ -15,8 +15,12 @@ worker-role servers are observe-only, so dispatched agents can't recurse.
 ## Layout
 
 ```
-schema/disponent.tsp      the schema's single source of truth (a fluessig catalog):
-                          entities, the event union, and the op surface.
+crates/disponent-schema   the schema's single source of truth: entities, the event
+                          union, and the op surface, AUTHORED as Rust derives with the
+                          fluessig Rust-derive front end. Its two emit bins print the
+                          catalog/api JSON. A codegen-time TOOL crate — its own nested
+                          [workspace], excluded from the default cargo set; reaches the
+                          fluessig derive crates via a gitignored `fluessig/` symlink.
 schema/*.json             emitted catalog/api/docs — generated, committed.
 crates/disponent-core     the engine (sync Rust): shipped catalog, ledger,
                           generated schema_gen.rs + mcp_generated.rs.
@@ -38,15 +42,17 @@ cargo test                # engine unit tests + the end-to-end stdio round-trip
 cd crates/disponent-node && bun install && bun run build
 bun run test              # the binding lifecycle over dry-run backends
 cargo fmt --all --check && cargo clippy --all-targets -- -D warnings
-scripts/gen.sh            # schema/disponent.tsp → every generated artifact
+scripts/gen.sh            # crates/disponent-schema → every generated artifact
 ```
 
 ## Conventions
 
 - **One schema mechanism.** Change the data model or the op surface by editing
-  `schema/disponent.tsp`, then run `scripts/gen.sh` and commit the regenerated
-  artifacts. Don't edit `schema_gen.rs`, `mcp_generated.rs`, or `schema/*.json`
-  by hand.
+  `crates/disponent-schema` (the fluessig Rust-derive front end), then run
+  `scripts/gen.sh` and commit the regenerated artifacts. Don't edit
+  `schema_gen.rs`, `mcp_generated.rs`, or `schema/*.json` by hand. Regenerating
+  needs a fluessig checkout (`../fluessig` or `FLUESSIG_DIR`) at the SHA pinned in
+  CI (`FLUESSIG_REF`) / `crates/disponent-core/Cargo.toml` — no TypeSpec or Node.
 - **The core stays synchronous.** Async is a per-binding concern (the entl
   discipline). The MCP stdio loop is a plain blocking read loop.
 - **Honest capability edges.** An op a phase hasn't reached yet fails with a

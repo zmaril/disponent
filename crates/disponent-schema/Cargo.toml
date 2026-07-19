@@ -1,0 +1,33 @@
+# disponent's schema, authored with the fluessig Rust derive front end. This is a
+# codegen-time TOOL crate, not part of disponent's runtime: it is deliberately its
+# own single-crate workspace (the `[workspace]` table below) so disponent's root
+# workspace — which has no fluessig checkout in the plain `cargo build` / `rust` CI
+# job — never tries to resolve its path dep on the fluessig derive crates.
+#
+# The path dep points at `fluessig/…`, a GITIGNORED symlink that scripts/gen.sh
+# creates → $FLUESSIG_DIR (a ../fluessig checkout locally, or the pinned clone in
+# CI). This mirrors how disponent already locates fluessig for the downstream
+# fluessig-gen stage: one FLUESSIG_DIR, resolved at codegen time.
+[workspace]
+# The `fluessig/` symlink (→ $FLUESSIG_DIR) is a full workspace of its own; keep it
+# out of this crate's workspace so cargo doesn't see two roots under one tree.
+exclude = ["fluessig"]
+
+[package]
+name = "disponent-schema"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+description = "disponent's schema + op surface, authored with the fluessig Rust derive front end. Emits catalog.json / api.json for fluessig-gen."
+publish = false
+
+[dependencies]
+fluessig-derive = { path = "fluessig/crates/fluessig-derive" }
+
+[[bin]]
+name = "fluessig-emit"
+path = "src/bin/fluessig-emit.rs"
+
+[[bin]]
+name = "fluessig-emit-api"
+path = "src/bin/fluessig-emit-api.rs"

@@ -14,3 +14,9 @@ jobs:
         with:
           version: v0.2.3
           sarif: "false"
+          # The generated ruby binding surface (crates/disponent-ruby/src/generated.rs)
+          # grew past the 1500-line default with the fluessig streaming dressing
+          # (fluessig_runtime AsyncGenerator + GVL-release poll loops); a generated
+          # file can't be hand-refactored. Lift the budget to 1600 — no hand-written
+          # file is anywhere near it (the next largest source file is well under 1500).
+          max-lines: "1600"

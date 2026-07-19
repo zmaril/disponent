@@ -63,19 +63,18 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
       - name: regenerate everything, fail on drift
         env:
           # The schema tool lives in its own repo; pin the SHA disponent
           # generates against (KEEP IN LOCKSTEP with the fluessig `rev` in
-          # crates/disponent-core/Cargo.toml — one tool, one version).
+          # crates/disponent-core/Cargo.toml and the fluessig-runtime `rev` in the
+          # binding Cargo.tomls — one tool, one version).
           #
-          # Points at fluessig `main` after #36 merged (that PR pins
-          # @typespec/compiler to exact 1.14.0 so the emitter's catalog/api
-          # stamp stops drifting). This is the #36 merge commit on main.
-          FLUESSIG_REF: 1d586bbe3f5d3890cee91a22066ea0cfa7206006
+          # Points at fluessig `main` at the #59 merge, which brings the
+          # Rust-derive front end (union authoring + readonly/destructive op
+          # hints). disponent's schema is now authored in crates/disponent-schema
+          # (the derive front end) — there is no TypeSpec or Node in this chain.
+          FLUESSIG_REF: d1a4eca8b1940967393646f09415f9f6ee760063
         run: |
           # Clone into RUNNER_TEMP (outside the workspace) so it can't register
           # as drift in the git-clean check below. Fetch the pinned SHA directly

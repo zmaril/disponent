@@ -32,7 +32,7 @@ done
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$1"; }
 
 if [ "$GEN" -eq 1 ]; then
-  step "regenerate from schema/disponent.tsp"
+  step "regenerate from crates/disponent-schema"
   scripts/gen.sh
 fi
 
