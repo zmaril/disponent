@@ -70,15 +70,23 @@ jobs:
           workspaces: ${{ runner.temp }}/hinzu
           key: hinzu-${{ env.HINZU_REF }}
 
-      - name: build hinzu (cli on stable, StableMIR driver on nightly)
+      - name: build hinzu-cli (stable 1.96.0)
         working-directory: ${{ runner.temp }}/hinzu
-        run: |
-          # hinzu-cli: the workspace rust-toolchain.toml selects stable 1.96.0.
-          cargo build --release -p hinzu-cli
-          # the driver crate is excluded from the workspace and pins the nightly
-          # via its own rust-toolchain.toml; build it explicitly so `hinzu check`
-          # reuses it (via HINZU_RUSTC_DRIVER) instead of rebuilding on the fly.
-          cargo build --release --manifest-path crates/hinzu-rustc-driver/Cargo.toml
+        # hinzu-cli: the workspace rust-toolchain.toml selects stable 1.96.0.
+        run: cargo build --release -p hinzu-cli
+
+      - name: build the StableMIR driver (nightly-2026-07-18)
+        # The driver crate is excluded from the workspace and pins the nightly
+        # (nightly-2026-07-18 + rustc-dev/llvm-tools/rust-src) via its OWN
+        # rust-toolchain.toml. rustup resolves the toolchain from the working
+        # directory, so this MUST run from the crate dir: building it from the
+        # hinzu root inherits the root's stable 1.96.0 override, which lacks the
+        # rustc-private crates and fails with E0463 (can't find crate for
+        # rustc_driver). `working-directory` selects the driver's nightly file —
+        # mirrors hinzu's own ci.yml self-check job. Building it explicitly lets
+        # `hinzu check` reuse it (via HINZU_RUSTC_DRIVER) rather than rebuild it.
+        working-directory: ${{ runner.temp }}/hinzu/crates/hinzu-rustc-driver
+        run: cargo build --release
 
       - name: hinzu check — functional-core gate (fails on any violation)
         env:
