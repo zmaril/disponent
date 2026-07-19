@@ -754,6 +754,8 @@ pub struct Session {
     pub dispatch_id: String,
     pub state: SessionState,
     pub env_handle: Option<String>,
+    pub attach_tmux_socket: Option<String>,
+    pub attach_tmux_session: Option<String>,
     pub url: Option<String>,
     pub resumed_from: Option<String>,
     pub started_at: Option<String>,
@@ -774,6 +776,12 @@ impl Session {
     }
     fn get_env_handle(&self) -> Option<String> {
         self.env_handle.clone()
+    }
+    fn get_attach_tmux_socket(&self) -> Option<String> {
+        self.attach_tmux_socket.clone()
+    }
+    fn get_attach_tmux_session(&self) -> Option<String> {
+        self.attach_tmux_session.clone()
     }
     fn get_url(&self) -> Option<String> {
         self.url.clone()
@@ -1334,6 +1342,14 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     c.define_method("dispatch_id", method!(Session::get_dispatch_id, 0))?;
     c.define_method("state", method!(Session::get_state, 0))?;
     c.define_method("env_handle", method!(Session::get_env_handle, 0))?;
+    c.define_method(
+        "attach_tmux_socket",
+        method!(Session::get_attach_tmux_socket, 0),
+    )?;
+    c.define_method(
+        "attach_tmux_session",
+        method!(Session::get_attach_tmux_session, 0),
+    )?;
     c.define_method("url", method!(Session::get_url, 0))?;
     c.define_method("resumed_from", method!(Session::get_resumed_from, 0))?;
     c.define_method("started_at", method!(Session::get_started_at, 0))?;

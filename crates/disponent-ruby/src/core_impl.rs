@@ -81,6 +81,8 @@ fn session_out(s: mcp::Session) -> anyhow::Result<Session> {
         dispatch_id: s.dispatch_id,
         state: SessionState::from_wire(&s.state)?,
         env_handle: s.env_handle.map(|v| v.to_string()),
+        attach_tmux_socket: s.attach_tmux_socket,
+        attach_tmux_session: s.attach_tmux_session,
         url: s.url,
         resumed_from: s.resumed_from,
         started_at: s.started_at,

@@ -559,6 +559,22 @@
       },
       {
         "def": null,
+        "desc": "The tmux server socket an external terminal can attach to when the env\nruns the agent in a reachable local multiplexer (the local tmux path);\npairs with attachTmuxSession. Both null for web/ttyd-only envs (exe.dev)\nand for the local holder path, whose terminal is reached differently. Two\nflat scalars rather than a nested object, to sidestep a fluessig\nMagnus-emitter gap for nested returned structs.",
+        "name": "attach_tmux_socket",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "The tmux session name inside attachTmuxSocket (dsp-uid for local\nworkers). Populated together with attachTmuxSocket, or not at all.",
+        "name": "attach_tmux_session",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
         "desc": "Human-facing view URL when the env has one (ttyd, web session page).",
         "name": "url",
         "notNull": false,

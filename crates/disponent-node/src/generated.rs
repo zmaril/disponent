@@ -423,6 +423,8 @@ pub struct Session {
     pub dispatch_id: String,
     pub state: SessionState,
     pub env_handle: Option<String>,
+    pub attach_tmux_socket: Option<String>,
+    pub attach_tmux_session: Option<String>,
     pub url: Option<String>,
     pub resumed_from: Option<String>,
     pub started_at: Option<String>,

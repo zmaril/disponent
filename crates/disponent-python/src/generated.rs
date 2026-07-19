@@ -666,6 +666,8 @@ pub struct Session {
     pub dispatch_id: String,
     pub state: SessionState,
     pub env_handle: Option<String>,
+    pub attach_tmux_socket: Option<String>,
+    pub attach_tmux_session: Option<String>,
     pub url: Option<String>,
     pub resumed_from: Option<String>,
     pub started_at: Option<String>,
@@ -677,12 +679,14 @@ pub struct Session {
 #[pymethods]
 impl Session {
     #[new]
-    #[pyo3(signature = (uid, dispatch_id, state, env_handle=None, url=None, resumed_from=None, started_at=None, ended_at=None, exit_reason=None, exit_detail=None, reaped_at=None))]
+    #[pyo3(signature = (uid, dispatch_id, state, env_handle=None, attach_tmux_socket=None, attach_tmux_session=None, url=None, resumed_from=None, started_at=None, ended_at=None, exit_reason=None, exit_detail=None, reaped_at=None))]
     fn new(
         uid: String,
         dispatch_id: String,
         state: SessionState,
         env_handle: Option<String>,
+        attach_tmux_socket: Option<String>,
+        attach_tmux_session: Option<String>,
         url: Option<String>,
         resumed_from: Option<String>,
         started_at: Option<String>,
@@ -696,6 +700,8 @@ impl Session {
             dispatch_id,
             state,
             env_handle,
+            attach_tmux_socket,
+            attach_tmux_session,
             url,
             resumed_from,
             started_at,
