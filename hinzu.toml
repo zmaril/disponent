@@ -1,0 +1,93 @@
+# disponent-core's functional-core boundary — the policy the `functional-core`
+# CI job enforces with `hinzu check` (github.com/zmaril/hinzu). It is the
+# regression guard that keeps effects out of the engine's pure data plane:
+# the shipped catalog, the generated schema, the generated MCP surface, the
+# status machine, the observation model, the terminal-condition detectors, and
+# the agent launch-spec must reach NO filesystem, network, database, or
+# subprocess effect, however deep the call chain.
+#
+# Those effects are confined to disponent-core's sanctioned effect surface: the
+# SQLite ledger mirror (`sink.rs`), the env backends (`backend.rs`, `local.rs`),
+# the OTLP receiver (`otel.rs`), and the orchestration seam that drives them
+# (`engine.rs`). This mirrors hinzu's own `hinzu-self.toml`, where the pure core
+# allows only computation and a `store` carve-out holds the SQLite effect plus
+# the `lib.rs` seam that opens it.
+#
+# Why `engine.rs` sits in the effect region, not the core: the Engine is the
+# ledger orchestrator. It performs no direct fs/net/db/process itself — its only
+# forbidden-effect reach is `sink::Sink::open`/`apply` (the ledger's durable
+# SQLite mirror, `engine::Ledger::mirror`) and the env backends it provisions.
+# That is the sanctioned seam, exactly like `lib.rs -> store.rs` in hinzu-self.
+# The guard therefore protects the ~1500-line pure data plane below the seam.
+# Direction of travel (disponent's own AGENTS.md): as the ledger's pure
+# reconciliation logic is split from the orchestrator and env backends move to
+# their own crates, this seam shrinks and more of `engine.rs` graduates into the
+# forbidding core — tightening the gate without ever loosening it.
+#
+# Heap allocation (`alloc`) is TRACKED but not forbidden: a functional core
+# allocates everywhere (every Vec/String/BTreeMap) and that is fine. The core
+# forbids only the real outbound I/O effects; `clock`/`random` (chrono/uuid,
+# used for ledger timestamps and ids) are computation-adjacent and likewise not
+# forbidden here.
+
+[analysis]
+# Unit/integration tests are not the functional core.
+ignore = ["**/tests/**"]
+
+# An external the analysis cannot see through is a violation, not a pass:
+# disponent-core cannot certify a pure core while reaching code it cannot audit.
+# The [trust] vouches below account for every external disponent-core actually
+# reaches, so this stays honestly green with the strict setting. (hinzu's Rust
+# annotation packs, when they land, would let several of these vouches be
+# dropped in favour of shipped summaries; the setting stays "fail" either way.)
+on_unknown = "fail"
+
+# The functional core: the whole crate `src/**` forbids the four real I/O
+# effects, however deep the call chain. `alloc`, `clock`, and `random` are not
+# forbidden (see header). The effect region below is a more-specific carve-out
+# that overrides this for the sanctioned files.
+[region.core]
+paths  = ["crates/disponent-core/src/**"]
+forbid = ["fs", "net", "db", "process"]
+
+# The sanctioned effect + orchestration surface. Each file earns its place:
+#   sink.rs    — the SQLite ledger mirror (the `db` + `fs` effect, via rusqlite).
+#   backend.rs — the exe.dev env provider (spawns processes; timing).
+#   local.rs   — the local tmux env provider (`fs` scratch dirs + `process`).
+#   otel.rs    — the in-process OTLP-over-HTTP receiver (the `net` effect).
+#   engine.rs  — the ledger orchestrator: the seam that opens the sink and
+#                provisions backends. Reaches db/fs ONLY through sink.rs; holds
+#                no direct I/O of its own.
+# All outbound effects are allowed here and nowhere else.
+[region.io]
+paths = [
+  "crates/disponent-core/src/sink.rs",
+  "crates/disponent-core/src/backend.rs",
+  "crates/disponent-core/src/local.rs",
+  "crates/disponent-core/src/otel.rs",
+  "crates/disponent-core/src/engine.rs",
+]
+allow = ["fs", "net", "db", "process", "env", "clock", "random", "alloc"]
+
+# Trusted external summaries: vouches for registry dependencies whose bodies the
+# driver never sees. "pure" clears a crate's calls; a list declares the effects
+# it carries. These extend hinzu's built-in std/core/alloc annotations and are
+# each an auditable claim — remove one and the calls it covers turn back into
+# Unknown findings under `on_unknown = "fail"`.
+[trust]
+# Pure value builders/parsers — no I/O.
+"serde" = "pure"
+"serde_json" = "pure"
+"anyhow" = "pure"
+# fluessig is the schema tool's runtime data plane: its SqlCodec compiles typed
+# mutations into ordered {sql, params} plans (pure string/value construction —
+# it builds SQL, it does not execute it; the sink runs the plan).
+"fluessig" = "pure"
+# Honest effect attributions (none of these are forbidden in the core):
+# chrono reads the wall clock (Utc::now -> the `clock` effect); uuid draws
+# randomness (new_v4 -> the `random` effect).
+"chrono" = ["clock"]
+"uuid" = ["random"]
+# The real outbound I/O, all confined to the effect region above:
+"rusqlite" = ["db"]      # the SQLite ledger mirror
+"tiny_http" = ["net"]    # the OTLP receiver
