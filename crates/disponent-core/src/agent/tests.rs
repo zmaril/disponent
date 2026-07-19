@@ -14,13 +14,20 @@ fn compute() -> Box<dyn Compute> {
 fn launch_spec_composes_flags_then_brief_argv() {
     let spec = LaunchSpec {
         agent_cmd: "claude --dangerously-skip-permissions".into(),
-        brief_ref: "\"$(cat ../brief.md)\"".into(),
+        brief_ref: Some("\"$(cat ../brief.md)\"".into()),
     };
     // Exactly the line the env used to bake in: agent + flags, brief as final argv.
     assert_eq!(
         spec.command(),
         "claude --dangerously-skip-permissions \"$(cat ../brief.md)\""
     );
+    // With no brief_ref (a per-dispatch agent_cmd override), the command runs
+    // verbatim — nothing appended.
+    let verbatim = LaunchSpec {
+        agent_cmd: "claude --teleport abc123".into(),
+        brief_ref: None,
+    };
+    assert_eq!(verbatim.command(), "claude --teleport abc123");
 }
 
 #[test]
@@ -33,7 +40,7 @@ fn lifecycle_verbs_run_over_a_compute_surface() {
     let c = compute();
     let spec = LaunchSpec {
         agent_cmd: "claude".into(),
-        brief_ref: "\"$(cat ../brief.md)\"".into(),
+        brief_ref: Some("\"$(cat ../brief.md)\"".into()),
     };
     // install/auth are honest no-ops (host-provided / template-baked), not fakes.
     ClaudeCode.install(&*c).unwrap();

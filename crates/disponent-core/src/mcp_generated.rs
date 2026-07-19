@@ -22,6 +22,8 @@ pub struct DispatchSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_remote: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_cmd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<String>,
@@ -435,6 +437,9 @@ pub const TOOLS_JSON: &str = r###"{
             "additionalProperties": false,
             "properties": {
               "agent": {
+                "type": "string"
+              },
+              "agentCmd": {
                 "type": "string"
               },
               "brief": {

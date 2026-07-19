@@ -235,6 +235,11 @@
           "nullable": true
         },
         {
+          "name": "agentCmd",
+          "type": "string",
+          "nullable": true
+        },
+        {
           "name": "template",
           "type": "string",
           "nullable": true
