@@ -322,6 +322,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "disponent-core",
+ "fluessig-runtime",
  "napi",
  "napi-build",
  "napi-derive",
@@ -334,8 +335,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "disponent-core",
+ "fluessig-runtime",
  "pyo3",
+ "pyo3-async-runtimes",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -344,7 +348,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "disponent-core",
+ "fluessig-runtime",
  "magnus",
+ "rb-sys",
  "serde_json",
 ]
 
@@ -375,13 +381,18 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 [[package]]
 name = "fluessig"
 version = "0.1.0"
-source = "git+https://github.com/zmaril/fluessig?rev=5c65e8f70245fa1940ac9071cfc12916e149a9d3#5c65e8f70245fa1940ac9071cfc12916e149a9d3"
+source = "git+https://github.com/zmaril/fluessig?rev=d1a4eca8b1940967393646f09415f9f6ee760063#d1a4eca8b1940967393646f09415f9f6ee760063"
 dependencies = [
  "genco",
  "serde",
  "serde_json",
  "sha2",
 ]
+
+[[package]]
+name = "fluessig-runtime"
+version = "0.1.0"
+source = "git+https://github.com/zmaril/fluessig?rev=d1a4eca8b1940967393646f09415f9f6ee760063#d1a4eca8b1940967393646f09415f9f6ee760063"
 
 [[package]]
 name = "foldhash"
@@ -726,6 +737,7 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash",
+ "tokio",
 ]
 
 [[package]]
@@ -847,6 +859,20 @@ dependencies = [
  "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
+]
+
+[[package]]
+name = "pyo3-async-runtimes"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3ef68daa7316a3fac65e5e18b2203f010346de1c1c53456811a2624673ab046"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "once_cell",
+ "pin-project-lite",
+ "pyo3",
+ "tokio",
 ]
 
 [[package]]
@@ -1170,6 +1196,15 @@ dependencies = [
  "chunked_transfer",
  "httpdate",
  "log",
+]
+
+[[package]]
+name = "tokio"
+version = "1.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d988bcd52dbe076d3d46903332f58c912b87a2c49b1428419a5845154762ffee"
+dependencies = [
+ "pin-project-lite",
 ]
 
 [[package]]

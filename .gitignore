@@ -3,6 +3,17 @@ node_modules/
 *.sqlite3
 *.db
 
+# crates/disponent-schema authors the schema with the fluessig Rust-derive front
+# end — a codegen-time TOOL, not part of disponent's runtime. It reaches the
+# fluessig derive crates through a `fluessig/` symlink → $FLUESSIG_DIR that
+# scripts/gen.sh creates at codegen time (mirroring how the downstream fluessig-gen
+# stage is located). Ignore it so a plain `cargo build` never chases a dangling
+# path dep, and the codegen-freshness gate stays clean. Its own nested workspace
+# builds into its own target/ + Cargo.lock — build artifacts, not committed.
+/crates/disponent-schema/fluessig
+/crates/disponent-schema/target
+/crates/disponent-schema/Cargo.lock
+
 # node binding build artifacts (napi CLI regenerates them)
 crates/disponent-node/index.js
 crates/disponent-node/index.d.ts

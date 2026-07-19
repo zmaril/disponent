@@ -3,24 +3,15 @@
 #![allow(clippy::all)]
 
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
+// The shared streaming contract — Poll/PollStream live in the fluessig-runtime crate.
+use fluessig_runtime::{Poll, PollStream};
 
 fn err(e: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
-}
-
-/// One poll result from a core stream (the sync primitive every stream shape dresses).
-pub enum Poll<T> {
-    Item(T),
-    Idle,
-    Closed,
-}
-
-/// The one sync primitive: a blocking, timeout-bounded poll.
-pub trait PollStream<T>: Send + Sync {
-    fn poll(&self, timeout: Duration) -> Poll<T>;
 }
 
 #[pyclass(eq, eq_int)]
@@ -829,45 +820,145 @@ pub trait DisponentCore: Sized + Send + Sync + 'static {
     ) -> anyhow::Result<Box<dyn PollStream<Statement>>>;
 }
 
-/// Poll-based stream from `Disponent.events`, dressed as a Python iterator.
+/// Event stream from `Disponent.events`, dressed as a Python async-iterable.
+///
+/// Primary surface: `async for ev in stream` (`__aiter__`/`__anext__`),
+/// driven off the asyncio loop. Retained surface: the sync iterator
+/// (`__iter__`/`__next__`) poll cursor for consumers not on asyncio.
+///
+/// DEFAULT error model = RAISE: a mid-stream core failure (`Poll::Failed`)
+/// maps to `Err(err(e))`, so the awaited `__anext__` (and the sync
+/// `__next__`) propagates a Python exception. Annotate the op
+/// `@streamError` to opt into the error-AS-EVENT model instead.
 #[pyclass]
 pub struct Events {
-    stream: Box<dyn PollStream<Event>>,
+    // Arc, not Box: the async future is `'static` and moves the handle
+    // across `.await` / `spawn_blocking`.
+    stream: Arc<dyn PollStream<Event>>,
 }
 #[pymethods]
 impl Events {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__(&self, py: Python<'_>) -> Option<Event> {
+    // Retained SYNC poll cursor. A terminal `Poll::Failed` raises a Python
+    // exception (throw-mode): the sync iterator has no error-as-event
+    // surface, so a mid-stream core failure surfaces as `err(e)`.
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<Event>> {
         py.detach(|| loop {
             match self.stream.poll(Duration::from_millis(500)) {
-                Poll::Item(v) => return Some(v),
+                Poll::Item(v) => return Ok(Some(v)),
                 Poll::Idle => continue,
-                Poll::Closed => return None, // None => StopIteration
+                Poll::Closed => return Ok(None), // None => StopIteration
+                Poll::Failed(e) => return Err(err(e)), // raises on failure
+            }
+        })
+    }
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+    // Async-iterable surface. `future_into_py` bridges the tokio future
+    // onto the running asyncio loop (needs the consumer's
+    // `pyo3-async-runtimes` tokio runtime — the pyo3 analogue of napi's
+    // `tokio_rt`). The blocking poll is driven off the loop via
+    // `spawn_blocking`, so the asyncio event loop is never blocked.
+    fn __anext__<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let stream = self.stream.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            loop {
+                let s = stream.clone();
+                let poll = tokio::task::spawn_blocking(move || s.poll(Duration::from_millis(500)))
+                    .await
+                    .map_err(err)?;
+                // throw-mode: a mid-stream failure REJECTS the awaited pull.
+                match poll {
+                    Poll::Item(v) => return Ok(v),
+                    Poll::Idle => continue,
+                    Poll::Closed => return Err(PyStopAsyncIteration::new_err(())),
+                    Poll::Failed(e) => return Err(err(e)),
+                }
             }
         })
     }
 }
 
-/// Poll-based stream from `Disponent.driverPlan`, dressed as a Python iterator.
+// Backstop: guarantee core-side close even if the consumer neither
+// exhausts nor cancels the iterator. PyO3 has no async-generator
+// `complete()` hook (unlike napi), so `Drop` is the only cancellation seam.
+impl Drop for Events {
+    fn drop(&mut self) {
+        self.stream.close();
+    }
+}
+
+/// Event stream from `Disponent.driverPlan`, dressed as a Python async-iterable.
+///
+/// Primary surface: `async for ev in stream` (`__aiter__`/`__anext__`),
+/// driven off the asyncio loop. Retained surface: the sync iterator
+/// (`__iter__`/`__next__`) poll cursor for consumers not on asyncio.
+///
+/// DEFAULT error model = RAISE: a mid-stream core failure (`Poll::Failed`)
+/// maps to `Err(err(e))`, so the awaited `__anext__` (and the sync
+/// `__next__`) propagates a Python exception. Annotate the op
+/// `@streamError` to opt into the error-AS-EVENT model instead.
 #[pyclass]
 pub struct DriverPlan {
-    stream: Box<dyn PollStream<Statement>>,
+    // Arc, not Box: the async future is `'static` and moves the handle
+    // across `.await` / `spawn_blocking`.
+    stream: Arc<dyn PollStream<Statement>>,
 }
 #[pymethods]
 impl DriverPlan {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__(&self, py: Python<'_>) -> Option<Statement> {
+    // Retained SYNC poll cursor. A terminal `Poll::Failed` raises a Python
+    // exception (throw-mode): the sync iterator has no error-as-event
+    // surface, so a mid-stream core failure surfaces as `err(e)`.
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<Statement>> {
         py.detach(|| loop {
             match self.stream.poll(Duration::from_millis(500)) {
-                Poll::Item(v) => return Some(v),
+                Poll::Item(v) => return Ok(Some(v)),
                 Poll::Idle => continue,
-                Poll::Closed => return None, // None => StopIteration
+                Poll::Closed => return Ok(None), // None => StopIteration
+                Poll::Failed(e) => return Err(err(e)), // raises on failure
             }
         })
+    }
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+    // Async-iterable surface. `future_into_py` bridges the tokio future
+    // onto the running asyncio loop (needs the consumer's
+    // `pyo3-async-runtimes` tokio runtime — the pyo3 analogue of napi's
+    // `tokio_rt`). The blocking poll is driven off the loop via
+    // `spawn_blocking`, so the asyncio event loop is never blocked.
+    fn __anext__<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let stream = self.stream.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            loop {
+                let s = stream.clone();
+                let poll = tokio::task::spawn_blocking(move || s.poll(Duration::from_millis(500)))
+                    .await
+                    .map_err(err)?;
+                // throw-mode: a mid-stream failure REJECTS the awaited pull.
+                match poll {
+                    Poll::Item(v) => return Ok(v),
+                    Poll::Idle => continue,
+                    Poll::Closed => return Err(PyStopAsyncIteration::new_err(())),
+                    Poll::Failed(e) => return Err(err(e)),
+                }
+            }
+        })
+    }
+}
+
+// Backstop: guarantee core-side close even if the consumer neither
+// exhausts nor cancels the iterator. PyO3 has no async-generator
+// `complete()` hook (unlike napi), so `Drop` is the only cancellation seam.
+impl Drop for DriverPlan {
+    fn drop(&mut self) {
+        self.stream.close();
     }
 }
 
@@ -992,6 +1083,8 @@ impl Disponent {
         py.detach(move || core.workspace_link(session_uid))
             .map_err(err)
     }
+    // pre-start boundary: building the stream (setup/validation) always
+    // RAISES on a core Err — independent of the stream's error model.
     #[pyo3(signature = (session_uid=None, after_idx=None, kinds=None))]
     fn events(
         &self,
@@ -1006,7 +1099,7 @@ impl Disponent {
         };
 
         Ok(Events {
-            stream: self.core.events(Some(event_options_arg)).map_err(err)?,
+            stream: Arc::from(self.core.events(Some(event_options_arg)).map_err(err)?),
         })
     }
     /// The one messaging primitive (notes/manager-worker-comms.md §6). A Manager
@@ -1093,6 +1186,8 @@ impl Disponent {
         let core = self.core.clone();
         py.detach(move || core.reconcile()).map_err(err)
     }
+    // pre-start boundary: building the stream (setup/validation) always
+    // RAISES on a core Err — independent of the stream's error model.
     #[pyo3(signature = (dialect=None, tables=None))]
     fn driver_plan(
         &self,
@@ -1102,10 +1197,11 @@ impl Disponent {
         let driver_plan_options_arg = DriverPlanOptions { dialect, tables };
 
         Ok(DriverPlan {
-            stream: self
-                .core
-                .driver_plan(Some(driver_plan_options_arg))
-                .map_err(err)?,
+            stream: Arc::from(
+                self.core
+                    .driver_plan(Some(driver_plan_options_arg))
+                    .map_err(err)?,
+            ),
         })
     }
     // @manual: wait — hand-written in lib.rs if this binding offers it.

@@ -9,10 +9,11 @@ Dispatch work to coding agents — locally in tmux or on remote environments
 ledger you can sink anywhere, and an MCP surface so a supervising agent can
 drive it.
 
-The schema is the single source of truth: [`schema/disponent.tsp`](./schema/disponent.tsp)
-(a [fluessig](https://github.com/zmaril/fluessig) catalog) generates the DDL,
-the MCP tools, and eventually every language binding. Design and phasing live
-in [`notes/design.md`](./notes/design.md).
+The schema is the single source of truth:
+[`crates/disponent-schema`](./crates/disponent-schema) authors it as Rust derives
+with the [fluessig](https://github.com/zmaril/fluessig) Rust-derive front end, and
+`scripts/gen.sh` generates the DDL, the MCP tools, and every language binding from
+it. Design and phasing live in [`notes/design.md`](./notes/design.md).
 
 ## Status
 

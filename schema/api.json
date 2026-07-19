@@ -1,14 +1,12 @@
 {
   "fluessig": {
     "format": 1,
-    "emitter": "0.0.0",
-    "compiler": "1.14.0"
+    "emitter": "fluessig-derive/0"
   },
   "source": "disponent.tsp",
   "models": [
     {
       "name": "StateChange",
-      "doc": null,
       "fields": [
         {
           "name": "from",
@@ -28,7 +26,6 @@
     },
     {
       "name": "AgentMessage",
-      "doc": null,
       "fields": [
         {
           "name": "role",
@@ -44,7 +41,6 @@
     },
     {
       "name": "ToolCallInfo",
-      "doc": null,
       "fields": [
         {
           "name": "tool",
@@ -60,7 +56,6 @@
     },
     {
       "name": "ToolResultInfo",
-      "doc": null,
       "fields": [
         {
           "name": "tool",
@@ -81,7 +76,6 @@
     },
     {
       "name": "LogLine",
-      "doc": null,
       "fields": [
         {
           "name": "line",
@@ -92,7 +86,6 @@
     },
     {
       "name": "UsageDelta",
-      "doc": null,
       "fields": [
         {
           "name": "modelId",
@@ -118,7 +111,6 @@
     },
     {
       "name": "ArtifactRef",
-      "doc": null,
       "fields": [
         {
           "name": "artifactIdx",
@@ -129,7 +121,6 @@
     },
     {
       "name": "RawObservation",
-      "doc": null,
       "fields": [
         {
           "name": "source",
@@ -180,7 +171,6 @@
     },
     {
       "name": "OpenOptions",
-      "doc": null,
       "fields": [
         {
           "name": "configPath",
@@ -196,7 +186,6 @@
     },
     {
       "name": "DispatchSpec",
-      "doc": null,
       "fields": [
         {
           "name": "brief",
@@ -286,7 +275,6 @@
     },
     {
       "name": "SessionFilter",
-      "doc": null,
       "fields": [
         {
           "name": "env",
@@ -335,7 +323,6 @@
     },
     {
       "name": "EventOptions",
-      "doc": null,
       "fields": [
         {
           "name": "sessionUid",
@@ -418,7 +405,6 @@
     },
     {
       "name": "ReconcileReport",
-      "doc": null,
       "fields": [
         {
           "name": "adopted",
@@ -444,7 +430,6 @@
     },
     {
       "name": "McpOptions",
-      "doc": null,
       "fields": [
         {
           "name": "transport",
@@ -467,7 +452,6 @@
     },
     {
       "name": "DriverPlanOptions",
-      "doc": null,
       "fields": [
         {
           "name": "dialect",
@@ -485,7 +469,6 @@
     },
     {
       "name": "Statement",
-      "doc": null,
       "fields": [
         {
           "name": "sql",
@@ -763,6 +746,7 @@
     {
       "name": "EventPayload",
       "doc": "One observation's body — the union's variant tag is the wire discriminator.",
+      "tag_field": null,
       "variants": [
         {
           "tag": "state",
@@ -824,11 +808,9 @@
   "interfaces": [
     {
       "name": "Disponent",
-      "doc": null,
       "ops": [
         {
           "name": "open",
-          "doc": null,
           "shape": "ctor",
           "params": [
             {
@@ -843,7 +825,6 @@
         },
         {
           "name": "environments",
-          "doc": null,
           "shape": "unary",
           "readonly": true,
           "params": [],
@@ -855,7 +836,6 @@
         },
         {
           "name": "refresh",
-          "doc": null,
           "shape": "unary",
           "params": [
             {
@@ -896,7 +876,6 @@
         },
         {
           "name": "dispatch",
-          "doc": null,
           "shape": "unary",
           "params": [
             {
@@ -912,7 +891,6 @@
         },
         {
           "name": "session",
-          "doc": null,
           "shape": "unary",
           "readonly": true,
           "params": [
@@ -929,7 +907,6 @@
         },
         {
           "name": "sessions",
-          "doc": null,
           "shape": "unary",
           "readonly": true,
           "params": [
@@ -964,7 +941,6 @@
         },
         {
           "name": "events",
-          "doc": null,
           "shape": "stream",
           "readonly": true,
           "params": [
@@ -1047,7 +1023,6 @@
         },
         {
           "name": "cancel",
-          "doc": null,
           "shape": "unary",
           "destructive": true,
           "params": [
@@ -1062,7 +1037,6 @@
         },
         {
           "name": "resume",
-          "doc": null,
           "shape": "unary",
           "params": [
             {
@@ -1076,7 +1050,6 @@
         },
         {
           "name": "reap",
-          "doc": null,
           "shape": "unary",
           "destructive": true,
           "params": [
@@ -1091,7 +1064,6 @@
         },
         {
           "name": "reconcile",
-          "doc": null,
           "shape": "unary",
           "params": [],
           "returns": {
@@ -1100,7 +1072,6 @@
         },
         {
           "name": "driverPlan",
-          "doc": null,
           "shape": "stream",
           "readonly": true,
           "params": [
