@@ -200,20 +200,43 @@ impl LocalTmux {
     }
 }
 
-/// The directly-attachable tmux target for a session, derived from its handle:
-/// the `(socket, session)` pair an external terminal reaches the agent with
-/// (`tmux -L <socket> attach -t <session>`). Populated only for the local tmux
-/// handle shape (`{ tmux, socket }`); the holder handle (`{ holder, holderSock }`)
-/// and exe.dev (`{ vmName, host }`) lack it, so this returns `(None, None)` for
-/// them — honest for envs whose terminal isn't a reachable local tmux.
-pub fn attach_tmux_from_handle(handle: &serde_json::Value) -> (Option<String>, Option<String>) {
-    // A holder session isn't a tmux session, even though it shares a workDir.
+/// The transport-neutral attach descriptor for a session, derived from its handle
+/// (and, when the env has one, its view url): where + how an external terminal
+/// reaches the live terminal, as the flat wire scalars `(transport, endpoint,
+/// target, url)`. Local tmux → `tmux` + `(socket, dsp-<uid>)`; the holder →
+/// `dsp_hold` + `(holderSock, uid)`; an env with only a web view (exe.dev/ttyd) →
+/// `ttyd` + url. All `None` when nothing reachable is known (e.g. a surveyed
+/// exe.dev handle with no url) — honest rather than faked. A consumer switches on
+/// `transport` instead of assuming tmux.
+#[allow(clippy::type_complexity)]
+pub fn attach_from_handle(
+    handle: &serde_json::Value,
+    uid: &str,
+    url: Option<&str>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    // A holder session dials the holder's unix socket; its target is the uid.
     if handle.get("holder").and_then(|v| v.as_bool()) == Some(true) {
-        return (None, None);
+        let endpoint = handle["holderSock"].as_str().map(str::to_string);
+        return (Some("dsp_hold".into()), endpoint, Some(uid.into()), None);
     }
-    match (handle["socket"].as_str(), handle["tmux"].as_str()) {
-        (Some(socket), Some(session)) => (Some(socket.to_string()), Some(session.to_string())),
-        _ => (None, None),
+    // A local tmux worker attaches to the (socket, session) pair.
+    if let (Some(socket), Some(session)) = (handle["socket"].as_str(), handle["tmux"].as_str()) {
+        return (
+            Some("tmux".into()),
+            Some(socket.into()),
+            Some(session.into()),
+            None,
+        );
+    }
+    // Otherwise the terminal is reachable only over the web (ttyd), if at all.
+    match url {
+        Some(u) => (Some("ttyd".into()), None, None, Some(u.into())),
+        None => (None, None, None, None),
     }
 }
 
@@ -905,20 +928,44 @@ mod tests {
     }
 
     #[test]
-    fn attach_tmux_from_handle_populates_only_the_tmux_path() {
-        // The tmux handle yields the correlated (socket, session) pair.
+    fn attach_from_handle_maps_each_transport() {
+        // Local tmux → the (socket, session) pair under the `tmux` transport.
         let tmux = LocalTmux::dry_run().handle("abc-123");
-        let (socket, session) = attach_tmux_from_handle(&tmux);
-        assert_eq!(socket.as_deref(), Some("disponent"));
-        assert_eq!(session.as_deref(), Some("dsp-abc-123"));
+        let (transport, endpoint, target, url) = attach_from_handle(&tmux, "abc-123", None);
+        assert_eq!(transport.as_deref(), Some("tmux"));
+        assert_eq!(endpoint.as_deref(), Some("disponent"));
+        assert_eq!(target.as_deref(), Some("dsp-abc-123"));
+        assert_eq!(url, None);
 
-        // The holder handle shares a workDir but is not a tmux session → null.
+        // The holder → its unix socket under `dsp_hold`, targeting the session uid.
         let holder = json!({ "holder": true, "holderSock": "/x.sock", "workDir": "/w" });
-        assert_eq!(attach_tmux_from_handle(&holder), (None, None));
+        assert_eq!(
+            attach_from_handle(&holder, "abc-123", None),
+            (
+                Some("dsp_hold".into()),
+                Some("/x.sock".into()),
+                Some("abc-123".into()),
+                None,
+            ),
+        );
 
-        // An exe.dev handle has no tmux shape → null.
+        // exe.dev with a ttyd view url → the `ttyd` transport carrying the url.
         let exe = json!({ "vmName": "vm", "host": "vm.exe.xyz" });
-        assert_eq!(attach_tmux_from_handle(&exe), (None, None));
+        assert_eq!(
+            attach_from_handle(&exe, "abc-123", Some("https://vm:7681")),
+            (
+                Some("ttyd".into()),
+                None,
+                None,
+                Some("https://vm:7681".into()),
+            ),
+        );
+
+        // A surveyed exe.dev handle with no url is honest: nothing reachable.
+        assert_eq!(
+            attach_from_handle(&exe, "abc-123", None),
+            (None, None, None, None),
+        );
     }
 
     // Run git in `dir`, panicking (with output) on failure. `-c user.*` keeps

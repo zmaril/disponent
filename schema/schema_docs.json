@@ -559,16 +559,32 @@
       },
       {
         "def": null,
-        "desc": "The tmux server socket an external terminal can attach to when the env\nruns the agent in a reachable local multiplexer (the local tmux path);\npairs with attachTmuxSession. Both null for web/ttyd-only envs (exe.dev)\nand for the local holder path, whose terminal is reached differently. Two\nflat scalars rather than a nested object, to sidestep a fluessig\nMagnus-emitter gap for nested returned structs.",
-        "name": "attach_tmux_socket",
+        "desc": "Transport-neutral attach descriptor (flat): how an external terminal reaches\nthis session's live terminal. `attachTransport` is the discriminator a\nconsumer switches on; the other three carry the address for that transport\n(tmux → endpoint+target; dsp-hold → endpoint+target; ttyd → url). All null\nwhen the env exposes no live terminal. Replaces #32's tmux-named scalars.\n\nFlat scalars rather than a nested `Attach` object: a nested returned struct\ntrips the fluessig Magnus/Ruby emitter (an unwrapped nested record makes the\n`Option<Attach>` getter fail to compile, E0599) — same reason #32 stayed\nflat. Node and Python handle nesting; Ruby does not, and every binding must\nbuild. See notes/owning-the-terminal.md §10.",
+        "name": "attach_transport",
         "notNull": false,
         "pk": false,
         "type": "text"
       },
       {
         "def": null,
-        "desc": "The tmux session name inside attachTmuxSocket (dsp-uid for local\nworkers). Populated together with attachTmuxSocket, or not at all.",
-        "name": "attach_tmux_session",
+        "desc": "Socket path (tmux server socket / holder unix socket), or an ssh target.\nSet for `tmux` and `dsp_hold`; pairs with `attachTarget`.",
+        "name": "attach_endpoint",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "tmux session name (dsp-uid for local tmux workers), or the session uid\n(holder). Populated together with `attachEndpoint`.",
+        "name": "attach_target",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
+        "desc": "ttyd/web fallback address — set for the `ttyd` transport.",
+        "name": "attach_url",
         "notNull": false,
         "pk": false,
         "type": "text"
