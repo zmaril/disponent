@@ -15,16 +15,28 @@ use crate::Role;
 /// The protocol revision we answer with when the client doesn't name one.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// The two writes a worker is allowed — `send` (up to its Manager) and `ack`
-/// (its own inbox). Named here, not derived from a schema decorator: see the
-/// note on [`tools_for`]. Keep this list in lockstep with the intercepts in
-/// [`worker_call`]; the no-dispatch invariant is that neither is a
-/// dispatch/spawn/reach-another-session op.
-const WORKER_WRITE_TOOLS: &[&str] = &["disponent_send", "disponent_ack"];
+/// The worker-writable tool names — the ops the schema flags `workerHint`
+/// (`#[fluessig(worker)]`), read straight from the generated manifest. Today
+/// that's exactly `send` + `ack`; the set is schema-owned, not hardcoded here.
+/// The surface gate ([`tools_for`]) widens on the same flag, and the worker-role
+/// server intercepts these to self-scope them (§9); the no-dispatch invariant is
+/// that no `workerHint` op is a dispatch/spawn/reach-another-session op.
+fn worker_hint_tools() -> Vec<String> {
+    let manifest: Value =
+        serde_json::from_str(mcp_generated::TOOLS_JSON).expect("generated manifest parses");
+    manifest["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter(|t| t["annotations"]["workerHint"] == json!(true))
+        .filter_map(|t| t["name"].as_str().map(String::from))
+        .collect()
+}
 
 pub fn serve(role: Role, sink: Option<&str>, bound_session: Option<String>) -> anyhow::Result<()> {
     let engine = Engine::open(sink)?;
     let tools = tools_for(role);
+    let worker_writes = worker_hint_tools();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
 
@@ -93,7 +105,14 @@ pub fn serve(role: Role, sink: Option<&str>, bound_session: Option<String>) -> a
                 if !tools.iter().any(|t| t["name"] == name) {
                     error(id, -32602, &format!("unknown tool: {name}"))
                 } else {
-                    match call_tool(&engine, role, bound_session.as_deref(), name, &args) {
+                    match call_tool(
+                        &engine,
+                        role,
+                        bound_session.as_deref(),
+                        &worker_writes,
+                        name,
+                        &args,
+                    ) {
                         Ok(v) => result(
                             id,
                             json!({"content": [{"type": "text",
@@ -117,20 +136,16 @@ pub fn serve(role: Role, sink: Option<&str>, bound_session: Option<String>) -> a
 }
 
 /// The generated manifest, gated by role. A supervisor sees everything; a
-/// worker sees the read-only observe tools PLUS its two self-scoped writes
-/// (`send` up to its Manager, `ack` on its own inbox). Every dispatch/spawn/
-/// reach-another-session op carries neither `readOnlyHint` nor a name in
-/// `WORKER_WRITE_TOOLS`, so it stays off the worker surface — the no-recursion
-/// invariant holds by tool absence.
+/// worker sees the read-only observe tools (`readOnlyHint`) PLUS the ops the
+/// schema flags worker-safe (`workerHint`) — today its two self-scoped writes,
+/// `send` (up to its Manager) and `ack` (its own inbox). Every dispatch/spawn/
+/// reach-another-session op carries neither hint, so it stays off the worker
+/// surface — the no-recursion invariant holds by tool absence.
 ///
-/// This is the pragmatic name-based gate (Option B): the worker-writable set is
-/// named here rather than declared by a schema decorator, because the
-/// declarative form — a fluessig `@worker` decorator lowering to a `workerHint`
-/// annotation, mirroring `@readonly`→`readOnlyHint` — is a cross-repo change to
-/// the pinned fluessig (its tsp lib + JS emitter + Rust MCP projection) and then
-/// a rev bump here. It buys nothing while the worker-writable set is exactly
-/// `{send, ack}`; escalate to the fluessig `@worker` decorator only if that list
-/// grows beyond send/ack. Tracked as a follow-up (see notes/manager-worker-comms.md).
+/// The worker-writable set is now DECLARED IN THE SCHEMA via `#[fluessig(worker)]`
+/// → the MCP `workerHint` annotation (the sibling of `@readonly`→`readOnlyHint`),
+/// not a hardcoded name list here. The invariant is checkable in CI and moves
+/// with the schema (see notes/manager-worker-comms.md §5).
 fn tools_for(role: Role) -> Vec<Value> {
     let manifest: Value =
         serde_json::from_str(mcp_generated::TOOLS_JSON).expect("generated manifest parses");
@@ -141,26 +156,26 @@ fn tools_for(role: Role) -> Vec<Value> {
         .filter(|t| {
             role == Role::Supervisor
                 || t["annotations"]["readOnlyHint"] == json!(true)
-                || t["name"]
-                    .as_str()
-                    .is_some_and(|n| WORKER_WRITE_TOOLS.contains(&n))
+                || t["annotations"]["workerHint"] == json!(true)
         })
         .cloned()
         .collect()
 }
 
-/// Route a tool call. A worker's `send`/`ack` are intercepted and self-scoped to
-/// its bound session (§9); everything else runs the generated Manager surface.
-/// The intercept is what forces a worker's `send` to its Manager and confines
-/// its `ack` to its own inbox — a worker can never name a recipient.
+/// Route a tool call. A worker's `workerHint` writes (`send`/`ack`) are
+/// intercepted and self-scoped to its bound session (§9); everything else runs
+/// the generated Manager surface. The intercept is what forces a worker's `send`
+/// to its Manager and confines its `ack` to its own inbox — a worker can never
+/// name a recipient. `worker_writes` is the schema-flagged set from the manifest.
 fn call_tool(
     engine: &Engine,
     role: Role,
     bound_session: Option<&str>,
+    worker_writes: &[String],
     name: &str,
     args: &Value,
 ) -> anyhow::Result<Value> {
-    if role == Role::Worker && WORKER_WRITE_TOOLS.contains(&name) {
+    if role == Role::Worker && worker_writes.iter().any(|w| w == name) {
         worker_call(engine, bound_session, name, args)
     } else {
         mcp_generated::dispatch(engine, name, args)
