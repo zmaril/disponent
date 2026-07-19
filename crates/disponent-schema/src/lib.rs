@@ -196,6 +196,21 @@ pub enum McpRole {
     Worker,
 }
 
+/// How an external terminal reaches a session's live terminal — the discriminator
+/// a consumer (pm) switches on to decide how to attach, instead of assuming tmux.
+#[derive(Enum, Clone, Copy)]
+#[fluessig(rename_all = "snake_case")]
+pub enum AttachTransport {
+    /// A reachable local tmux server: `attachEndpoint` = the socket, `attachTarget`
+    /// = the tmux session name.
+    Tmux,
+    /// A disponent pty-holder: `attachEndpoint` = the holder's unix socket path,
+    /// `attachTarget` = the session uid.
+    DspHold,
+    /// A ttyd/web fallback: `attachUrl` carries the address.
+    Ttyd,
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // The tagged union — the whole point of this acid test (feature A).
 // ═════════════════════════════════════════════════════════════════════════════
@@ -401,16 +416,26 @@ pub struct Session {
     pub state: SessionState,
     /// The env's own handle(s): tmux session name, VM name, web session id/url.
     pub env_handle: Option<Json>,
-    /// The tmux server socket an external terminal can attach to when the env
-    /// runs the agent in a reachable local multiplexer (the local tmux path);
-    /// pairs with attachTmuxSession. Both null for web/ttyd-only envs (exe.dev)
-    /// and for the local holder path, whose terminal is reached differently. Two
-    /// flat scalars rather than a nested object, to sidestep a fluessig
-    /// Magnus-emitter gap for nested returned structs.
-    pub attach_tmux_socket: Option<String>,
-    /// The tmux session name inside attachTmuxSocket (dsp-uid for local
-    /// workers). Populated together with attachTmuxSocket, or not at all.
-    pub attach_tmux_session: Option<String>,
+    /// Transport-neutral attach descriptor (flat): how an external terminal reaches
+    /// this session's live terminal. `attachTransport` is the discriminator a
+    /// consumer switches on; the other three carry the address for that transport
+    /// (tmux → endpoint+target; dsp-hold → endpoint+target; ttyd → url). All null
+    /// when the env exposes no live terminal. Replaces #32's tmux-named scalars.
+    ///
+    /// Flat scalars rather than a nested `Attach` object: a nested returned struct
+    /// trips the fluessig Magnus/Ruby emitter (an unwrapped nested record makes the
+    /// `Option<Attach>` getter fail to compile, E0599) — same reason #32 stayed
+    /// flat. Node and Python handle nesting; Ruby does not, and every binding must
+    /// build. See notes/owning-the-terminal.md §10.
+    pub attach_transport: Option<AttachTransport>,
+    /// Socket path (tmux server socket / holder unix socket), or an ssh target.
+    /// Set for `tmux` and `dsp_hold`; pairs with `attachTarget`.
+    pub attach_endpoint: Option<String>,
+    /// tmux session name (dsp-uid for local tmux workers), or the session uid
+    /// (holder). Populated together with `attachEndpoint`.
+    pub attach_target: Option<String>,
+    /// ttyd/web fallback address — set for the `ttyd` transport.
+    pub attach_url: Option<url>,
     /// Human-facing view URL when the env has one (ttyd, web session page).
     pub url: Option<url>,
     pub resumed_from: Option<Id<Session>>,
@@ -807,6 +832,7 @@ catalog! {
     enums: [
         EnvKind, SessionState, ExitReason, IsolationKind, TemplateKind,
         CapabilityKind, EventKind, Party, Fidelity, ArtifactKind, McpRole,
+        AttachTransport,
     ],
     unions: [EventPayload],
     scalars: [DispatchId, SessionUid, MessageId, FanoutId, Cents],
