@@ -1,0 +1,101 @@
+# straitjacket-allow-file[:duplication] — the checkout/toolchain setup mirrors
+# the other CI jobs by necessity (Actions YAML has no shared-setup primitive).
+#
+# The functional-core enforcement gate. It runs hinzu (github.com/zmaril/hinzu)
+# with fail-on-violation over disponent-core's functional-core boundary: the
+# engine's pure data plane (catalog, generated schema, generated MCP surface,
+# status machine, observation model, detectors, agent launch-spec) must reach
+# NO filesystem, network, database, or subprocess effect, however deep the call
+# chain. Effects are confined to the sanctioned surface (the SQLite ledger
+# mirror, the env backends, the OTLP receiver, and the engine orchestration seam
+# that drives them) — see hinzu.toml for the boundary and why each file sits
+# where it does. disponent-core is clean today, so this gate guards against
+# REGRESSIONS: it fails the build the moment fs/net/db/process reaches the core.
+name: functional-core
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  functional-core:
+    name: functional-core
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # hinzu is pinned by commit SHA — the same discipline as the fluessig pin
+      # in the codegen job. This is current hinzu `main` HEAD. NB: hinzu's Rust
+      # annotation packs are unmerged as of this SHA; the policy stays honestly
+      # green without them (0 cannot-certify — every external disponent-core
+      # reaches is vouched in hinzu.toml). Bumping this SHA after those packs
+      # land will let several [trust] vouches drop in favour of shipped
+      # summaries and tighten the analysis — bump deliberately.
+      HINZU_REF: 4880afdd624f4bad0613f3b6e09231bc738888f3
+    steps:
+      - uses: actions/checkout@v4
+
+      # hinzu-cli builds on a pinned stable (its rust-toolchain.toml → 1.96.0);
+      # the StableMIR driver and the target-crate extraction build run on the
+      # pinned nightly with the private-rustc components. Install both so each
+      # checkout's toolchain file selects the right one automatically.
+      - name: install stable 1.96.0 (hinzu-cli)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.0
+      - name: install nightly-2026-07-18 (driver + extraction)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-18
+          components: rustc-dev, llvm-tools, rust-src
+
+      # the SQLite ledger mirror links libsqlite3 via the `bundled` feature (cc);
+      # tmux is not needed here (no backend integration tests run in this gate).
+      - name: obtain hinzu at the pinned commit
+        run: |
+          # Clone into RUNNER_TEMP (outside the workspace) so it never shows up
+          # as tree drift. Fetch the pinned SHA directly (clone --branch takes
+          # refs, not SHAs) — a depth-1 fetch of the commit brings the full tree.
+          git init -q "$RUNNER_TEMP/hinzu"
+          git -C "$RUNNER_TEMP/hinzu" fetch -q --depth 1 \
+            https://github.com/zmaril/hinzu "$HINZU_REF"
+          git -C "$RUNNER_TEMP/hinzu" checkout -q FETCH_HEAD
+
+      # Cache hinzu's own build (cli + driver) keyed on the pinned SHA, so reruns
+      # skip the heavy compile (dbsp). The target-crate extraction below runs in
+      # a throwaway CARGO_TARGET_DIR by design and is deliberately not cached.
+      - name: cache hinzu build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ runner.temp }}/hinzu
+          key: hinzu-${{ env.HINZU_REF }}
+
+      - name: build hinzu-cli (stable 1.96.0)
+        working-directory: ${{ runner.temp }}/hinzu
+        # hinzu-cli: the workspace rust-toolchain.toml selects stable 1.96.0.
+        run: cargo build --release -p hinzu-cli
+
+      - name: build the StableMIR driver (nightly-2026-07-18)
+        # The driver crate is excluded from the workspace and pins the nightly
+        # (nightly-2026-07-18 + rustc-dev/llvm-tools/rust-src) via its OWN
+        # rust-toolchain.toml. rustup resolves the toolchain from the working
+        # directory, so this MUST run from the crate dir: building it from the
+        # hinzu root inherits the root's stable 1.96.0 override, which lacks the
+        # rustc-private crates and fails with E0463 (can't find crate for
+        # rustc_driver). `working-directory` selects the driver's nightly file —
+        # mirrors hinzu's own ci.yml self-check job. Building it explicitly lets
+        # `hinzu check` reuse it (via HINZU_RUSTC_DRIVER) rather than rebuild it.
+        working-directory: ${{ runner.temp }}/hinzu/crates/hinzu-rustc-driver
+        run: cargo build --release
+
+      - name: hinzu check — functional-core gate (fails on any violation)
+        env:
+          HINZU_RUSTC_DRIVER: ${{ runner.temp }}/hinzu/crates/hinzu-rustc-driver/target/release/hinzu-rustc-driver
+        run: |
+          # `hinzu check` exits non-zero on any policy violation — that non-zero
+          # exit IS the gate. No `|| true`, no continue-on-error: a leak here
+          # must fail the build. It drives `cargo +nightly-2026-07-18 build` over
+          # disponent-core (a fresh target dir) with the driver as the workspace
+          # wrapper, then propagates effects and checks them against hinzu.toml.
+          "$RUNNER_TEMP/hinzu/target/release/hinzu" check \
+            crates/disponent-core --policy hinzu.toml
