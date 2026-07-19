@@ -33,7 +33,7 @@ jobs:
       # summaries and tighten the analysis — bump deliberately.
       HINZU_REF: 4880afdd624f4bad0613f3b6e09231bc738888f3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # hinzu-cli builds on a pinned stable (its rust-toolchain.toml → 1.96.0);
       # the StableMIR driver and the target-crate extraction build run on the
