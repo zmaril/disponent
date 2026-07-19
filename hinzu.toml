@@ -7,9 +7,10 @@
 # subprocess effect, however deep the call chain.
 #
 # Those effects are confined to disponent-core's sanctioned effect surface: the
-# SQLite ledger mirror (`sink.rs`), the env backends (`backend.rs`, `local.rs`),
-# the OTLP receiver (`otel.rs`), and the orchestration seam that drives them
-# (`engine.rs`). This mirrors hinzu's own `hinzu-self.toml`, where the pure core
+# SQLite ledger mirror (`sink.rs`), the env backends (`backend.rs`, `local.rs`,
+# `modal.rs`), the OTLP receiver (`otel.rs`), and the orchestration seam that
+# drives them (`engine.rs` and its child modules `engine/messaging.rs` +
+# `engine/watch.rs`). This mirrors hinzu's own `hinzu-self.toml`, where the pure core
 # allows only computation and a `store` carve-out holds the SQLite effect plus
 # the `lib.rs` seam that opens it.
 #
@@ -54,18 +55,35 @@ forbid = ["fs", "net", "db", "process"]
 #   sink.rs    — the SQLite ledger mirror (the `db` + `fs` effect, via rusqlite).
 #   backend.rs — the exe.dev env provider (spawns processes; timing).
 #   local.rs   — the local tmux env provider (`fs` scratch dirs + `process`).
+#   modal.rs   — the Modal env provider: shells to an embedded Python driver
+#                (`std::process::Command`) and materializes it on disk
+#                (`std::fs::read_to_string`/`write`) — `fs` + `process`, the same
+#                category as backend.rs/local.rs (a new remote env backend).
 #   otel.rs    — the in-process OTLP-over-HTTP receiver (the `net` effect).
 #   engine.rs  — the ledger orchestrator: the seam that opens the sink and
 #                provisions backends. Reaches db/fs ONLY through sink.rs; holds
 #                no direct I/O of its own.
+#   engine/messaging.rs — child module of the orchestrator (§11 manager↔worker
+#                messaging): its send/ack/messages handlers mint control-plane
+#                rows and drive the ledger mirror (`Ledger::mirror` -> sink), so
+#                they carry the same `db` seam engine.rs was carved out for.
+#   engine/watch.rs — child module of the orchestrator (the terminal watcher):
+#                mirrors observed frames/state through `Ledger::mirror` (`db`)
+#                and polls the env backends' `capture` (`process`). Effect seam,
+#                not pure logic.
+# (engine/tests.rs is `#[cfg(test)]` — not built in the normal analysis build,
+# so the driver never sees it; it needs no entry here.)
 # All outbound effects are allowed here and nowhere else.
 [region.io]
 paths = [
   "crates/disponent-core/src/sink.rs",
   "crates/disponent-core/src/backend.rs",
   "crates/disponent-core/src/local.rs",
+  "crates/disponent-core/src/modal.rs",
   "crates/disponent-core/src/otel.rs",
   "crates/disponent-core/src/engine.rs",
+  "crates/disponent-core/src/engine/messaging.rs",
+  "crates/disponent-core/src/engine/watch.rs",
 ]
 allow = ["fs", "net", "db", "process", "env", "clock", "random", "alloc"]
 
