@@ -649,7 +649,10 @@ pub const TOOLS_JSON: &str = r###"{
       "name": "disponent_events"
     },
     {
-      "description": "The one messaging primitive (notes/manager-worker-comms.md §6). A Manager\n`to` names a tagged worker subset (fan-out) or the user; recipients resolve\nat send time to a concrete list (a snapshot, never kept live). One Message\nis minted per matched session, all sharing a freshly minted `fanoutId`;\n`topic` (optional) is the supersession key for latest-wins (§7). Returns the\nMessages minted. Delivery is the reader's `events` pull; a message to a\nconcrete live worker is also delivered best-effort to its prompt on an\ninteract-capable env (the legacy `send` behavior, now one backend delivery).\nWorker self-send (recipient forced to the Manager) is a worker-role MCP\nconcern, deferred — the core send is the Manager surface.",
+      "annotations": {
+        "workerHint": true
+      },
+      "description": "The one messaging primitive (notes/manager-worker-comms.md §6). A Manager\n`to` names a tagged worker subset (fan-out) or the user; recipients resolve\nat send time to a concrete list (a snapshot, never kept live). One Message\nis minted per matched session, all sharing a freshly minted `fanoutId`;\n`topic` (optional) is the supersession key for latest-wins (§7). Returns the\nMessages minted. Delivery is the reader's `events` pull; a message to a\nconcrete live worker is also delivered best-effort to its prompt on an\ninteract-capable env (the legacy `send` behavior, now one backend delivery).\nWorker self-send (recipient forced to the Manager) is a worker-role MCP\nconcern, deferred — the core send is the Manager surface.\n\n`#[fluessig(worker)]`: safe on a worker-role MCP surface — it lowers to\nthe `workerHint` annotation the gate widens on (notes/manager-worker-comms.md\n§5). A worker's `send` is recipient-forced to its Manager by the\nworker-role server; it can never address a sibling or the environment.",
       "inputSchema": {
         "$defs": {
           "SendTarget": {
@@ -698,7 +701,10 @@ pub const TOOLS_JSON: &str = r###"{
       "name": "disponent_send"
     },
     {
-      "description": "Acknowledge a message you received (received/handled): stamps `ackedAt`,\nwhich the Manager observes across a `fanoutId` to see \"N of M acted\" (§7).\nIdempotent.",
+      "annotations": {
+        "workerHint": true
+      },
+      "description": "Acknowledge a message you received (received/handled): stamps `ackedAt`,\nwhich the Manager observes across a `fanoutId` to see \"N of M acted\" (§7).\nIdempotent.\n\n`#[fluessig(worker)]`: worker-surface safe (§5) — a worker acks only its\nown inbox, enforced by the worker-role server.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

@@ -1126,6 +1126,11 @@ impl Disponent {
     /// interact-capable env (the legacy `send` behavior, now one backend delivery).
     /// Worker self-send (recipient forced to the Manager) is a worker-role MCP
     /// concern, deferred — the core send is the Manager surface.
+    ///
+    /// `#[fluessig(worker)]`: safe on a worker-role MCP surface — it lowers to
+    /// the `workerHint` annotation the gate widens on (notes/manager-worker-comms.md
+    /// §5). A worker's `send` is recipient-forced to its Manager by the
+    /// worker-role server; it can never address a sibling or the environment.
     #[pyo3(signature = (body, tags=None, sessions=None, user=None, in_reply_to=None, topic=None))]
     fn send(
         &self,
@@ -1150,6 +1155,9 @@ impl Disponent {
     /// Acknowledge a message you received (received/handled): stamps `ackedAt`,
     /// which the Manager observes across a `fanoutId` to see "N of M acted" (§7).
     /// Idempotent.
+    ///
+    /// `#[fluessig(worker)]`: worker-surface safe (§5) — a worker acks only its
+    /// own inbox, enforced by the worker-role server.
     #[pyo3(signature = (message_id))]
     fn ack(&self, py: Python<'_>, message_id: String) -> PyResult<()> {
         let core = self.core.clone();
