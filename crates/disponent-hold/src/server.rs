@@ -328,7 +328,21 @@ fn reader_loop(mut master: std::fs::File, shared: Arc<Shared>) {
     let mut buf = [0u8; 64 * 1024];
     loop {
         match master.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                // A read on the pty master returns `Ok(0)` when no slave is open.
+                // On Linux that only happens once the child (and its slave dups)
+                // are gone — a true EOF. On macOS/BSD it *also* fires in the brief
+                // window at startup before the forked child has dup'd the slave
+                // onto its stdio, i.e. a spurious EOF while the child is very much
+                // alive. Distinguish by the watcher: a real EOF is always preceded
+                // by the child being reaped. If it hasn't been, this is the startup
+                // race — yield and retry; the next read blocks once the slave opens.
+                if shared.inner.lock().unwrap().reaped.is_some() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
             Ok(n) => {
                 let chunk = &buf[..n];
                 let mut frames = Vec::new();
@@ -419,6 +433,11 @@ fn accept_loop(listener: UnixListener, shared: Arc<Shared>, shutdown: Arc<Atomic
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // A socket accepted from a non-blocking listener inherits
+                // `O_NONBLOCK` on macOS/BSD (but not Linux). Left set, the
+                // per-client read loop would see EAGAIN instead of blocking for
+                // the next frame and detach immediately — so force it blocking.
+                let _ = stream.set_nonblocking(false);
                 let shared = Arc::clone(&shared);
                 thread::spawn(move || {
                     if let Err(_e) = handle_client(stream, shared) {
