@@ -15,7 +15,10 @@ uuid = { workspace = true }
 # The schema tool doubles as the runtime data plane: SqlCodec compiles typed
 # mutations into ordered {sql, params} plans (the sink + driverPlan). Pinned by
 # SHA, same discipline as the codegen pin in scripts/gen.sh — bump deliberately.
-fluessig = { git = "https://github.com/zmaril/fluessig", rev = "d1a4eca8b1940967393646f09415f9f6ee760063" }
+# TEMPORARY: pinned at fluessig#68 @ 0856fe5 (branch feat/worker-op-flag), which
+# adds the `#[fluessig(worker)]` op flag → MCP `workerHint`. Re-pin to the merged
+# fluessig main SHA once #68 lands.
+fluessig = { git = "https://github.com/zmaril/fluessig", rev = "0856fe546cb0e5c547ea8cba0bb0ff281012b28c" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tiny_http = { workspace = true }
 # The M1 local-holder path (DISPONENT_LOCAL_HOLDER): the local backend can run
