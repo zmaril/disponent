@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use disponent_hold::{attach, Config, Holder};
+use disponent_hold::{attach, Client, Config, Holder, ServerFrame};
 
 mod mcp_server;
 
@@ -108,6 +108,54 @@ enum Cmd {
         #[arg(long)]
         restore: bool,
     },
+
+    /// One-shot: type a line at a held session (a momentary writer that releases
+    /// on exit), appending Enter — the holder analogue of `tmux send-keys …
+    /// Enter`. Rejects honestly if a human attacher holds the writer. This is the
+    /// remote INTERACT verb the engine drives over `ssh <vm> disponent hold-send`
+    /// (M4, notes/owning-the-terminal.md §5).
+    HoldSend {
+        /// The session uid to send to.
+        uid: String,
+        /// The line to type (Enter is appended).
+        input: String,
+        /// Where the socket lives (must match the holder's `--socket-dir`).
+        #[arg(long)]
+        socket_dir: Option<PathBuf>,
+    },
+
+    /// One-shot: drain a held session's scrollback ring to stdout as the current
+    /// snapshot — the holder analogue of `tmux capture-pane -p`. The engine's
+    /// remote `capture` rides `ssh <vm> disponent hold-capture` (M4).
+    HoldCapture {
+        /// The session uid to snapshot.
+        uid: String,
+        /// Where the socket lives (must match the holder's `--socket-dir`).
+        #[arg(long)]
+        socket_dir: Option<PathBuf>,
+    },
+
+    /// One-shot: interrupt a held session (C-c on the pty) — the child survives.
+    /// The holder analogue of `tmux send-keys C-c`; the engine's remote
+    /// `interrupt` rides `ssh <vm> disponent hold-interrupt` (M4).
+    HoldInterrupt {
+        /// The session uid to interrupt.
+        uid: String,
+        /// Where the socket lives (must match the holder's `--socket-dir`).
+        #[arg(long)]
+        socket_dir: Option<PathBuf>,
+    },
+
+    /// One-shot: kill a held session's child (SIGKILL to its group) — the VM
+    /// stays for inspection. The holder analogue of `tmux kill-session`; the
+    /// engine's remote `kill` rides `ssh <vm> disponent hold-stop` (M4).
+    HoldStop {
+        /// The session uid to kill.
+        uid: String,
+        /// Where the socket lives (must match the holder's `--socket-dir`).
+        #[arg(long)]
+        socket_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
@@ -143,7 +191,59 @@ fn main() -> anyhow::Result<()> {
             let code = attach(socket_dir.as_deref(), &uid, write, restore)?;
             std::process::exit(code);
         }
+        Cmd::HoldSend {
+            uid,
+            input,
+            socket_dir,
+        } => {
+            // A momentary writer: send the line + Enter, then drop (releasing the
+            // lock). `connect_writer_uid` errors honestly if a human holds it.
+            let mut bytes = input.into_bytes();
+            bytes.push(b'\n');
+            Client::connect_writer_uid(socket_dir.as_deref(), &uid)?.send_input(&bytes)
+        }
+        Cmd::HoldCapture { uid, socket_dir } => hold_capture(socket_dir.as_deref(), &uid),
+        Cmd::HoldInterrupt { uid, socket_dir } => {
+            Client::connect_writer_uid(socket_dir.as_deref(), &uid)?.interrupt()
+        }
+        Cmd::HoldStop { uid, socket_dir } => {
+            // Kill is the ungated control frame — a reader connection carries it.
+            Client::connect_uid(socket_dir.as_deref(), &uid)?.kill()
+        }
     }
+}
+
+/// Drain a holder's replayed ring to stdout, stopping when the stream goes quiet
+/// (a short read timeout) — the byte-exact snapshot behind `hold-capture`.
+/// Mirrors the engine's in-process `HolderCompute::capture`.
+fn hold_capture(socket_dir: Option<&std::path::Path>, uid: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut c = Client::connect_uid(socket_dir, uid)?;
+    c.set_read_timeout(Some(std::time::Duration::from_millis(150)))?;
+    let mut out = std::io::stdout();
+    loop {
+        match c.read_frame() {
+            Ok(Some(ServerFrame::Data(d))) => out.write_all(&d)?,
+            Ok(Some(ServerFrame::Heartbeat)) => {}
+            Ok(Some(ServerFrame::Exit(_))) | Ok(None) => break,
+            Err(e) => {
+                // A read timeout (WouldBlock/TimedOut) means the ring is drained —
+                // the normal end of a snapshot, not a fault. The drain-to-timeout
+                // loop mirrors the engine's in-process `HolderCompute::capture` by
+                // design (same holder ring, different transport).
+                if let Some(io) = e.downcast_ref::<std::io::Error>() {
+                    // straitjacket-allow:duplication — intentional parallel of HolderCompute::capture
+                    use std::io::ErrorKind::{TimedOut, WouldBlock};
+                    if matches!(io.kind(), WouldBlock | TimedOut) {
+                        break;
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
 }
 
 /// Run the holder in the foreground (or daemonized), blocking until the child
