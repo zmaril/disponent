@@ -8,3 +8,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "bun"
+    directory: "/crates/disponent-node"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "bundler"
+    directory: "/crates/disponent-ruby"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "uv"
+    directory: "/crates/disponent-python"
+    schedule:
+      interval: "weekly"

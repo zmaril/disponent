@@ -5,3 +5,8 @@ fleet = "zmaril/powderworks"
 website = "off"
 # Adopted on enrollment; the fleet default is "recommended".
 conventional-commits = "required"
+
+[allow-auto-merge]
+# Auto-merge is enabled on the repo so a green PR can land without a babysitter.
+# The check asserts GitHub's allow_auto_merge matches this declaration.
+enabled = true
