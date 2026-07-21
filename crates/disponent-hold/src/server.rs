@@ -599,6 +599,22 @@ pub fn daemonize() -> Result<()> {
             0 => {}              // grandchild: the real holder
             _ => libc::_exit(0), // intermediate child exits
         }
+        // Detach the standard fds. The grandchild outlives the process that
+        // launched it — but until it drops the stdio it inherited, whoever
+        // opened that stdio blocks on it. The launch path is
+        // `ssh <vm> disponent hold … --daemonize`: the holder inherits the ssh
+        // channel's stdout/stderr, so ssh (and the engine's provisioning step
+        // driving it) hangs forever waiting for the channel to close. Point
+        // 0/1/2 at /dev/null so the channel closes and the caller returns.
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+        if devnull >= 0 {
+            libc::dup2(devnull, 0);
+            libc::dup2(devnull, 1);
+            libc::dup2(devnull, 2);
+            if devnull > 2 {
+                libc::close(devnull);
+            }
+        }
     }
     Ok(())
 }

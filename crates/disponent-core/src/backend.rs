@@ -931,6 +931,13 @@ chmod +x "$HOME/disponent-run.sh"
 mkdir -p "$HOME/.disponent"
 "$HOME/disponent" hold worker --socket-dir "$HOME/.disponent" --daemonize -- "$HOME/disponent-run.sh" "$work"
 if command -v ttyd >/dev/null; then
+  # A template may ship ttyd as a systemd service (a login shell on this port);
+  # left running it reclaims the port the instant `pkill` frees it — systemd
+  # restarts it faster than we can bind — so the holder's ttyd loses the race
+  # with EADDRINUSE and the browser terminal shows a login shell, not the
+  # session. Stop the service first (best-effort: no service / no privilege is a
+  # harmless no-op, and `pkill` still covers a non-systemd ttyd).
+  sudo systemctl stop ttyd 2>/dev/null || systemctl stop ttyd 2>/dev/null || true
   pkill -f "ttyd .*$TTYD_PORT" 2>/dev/null || true
   setsid ttyd -p "$TTYD_PORT" -W "$HOME/disponent" hold-attach worker --write --socket-dir "$HOME/.disponent" >/tmp/ttyd.log 2>&1 &
 fi
@@ -1073,6 +1080,10 @@ mod tests {
         assert!(
             s.contains("-W \"$HOME/disponent\" hold-attach worker --write"),
             "ttyd points at the holder's hold-attach"
+        );
+        assert!(
+            s.contains("systemctl stop ttyd"),
+            "stops a template's systemd ttyd service so it can't reclaim the port"
         );
         // the composed command (brief cat) is wired into the run script before
         // the holder launches
