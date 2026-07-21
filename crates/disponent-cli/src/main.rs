@@ -1,7 +1,8 @@
 //! The disponent CLI. `disponent mcp` is the stdio MCP server over an
 //! in-process engine; `disponent hold` / `disponent attach` are the headless
 //! pty holder and its attach client (notes/owning-the-terminal.md). `attach` is
-//! reader-default; `--write` requests the single writer lock (M2a).
+//! reader-default; `--write` requests the single writer lock (M2a); `--restore`
+//! asks for a clean vt100 screen repaint on reattach (M3).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -82,6 +83,12 @@ enum Cmd {
     /// read-only. Exits with the child's code; restores the terminal on every
     /// exit path.
     ///
+    /// Pass `--restore` for a clean vt100 screen repaint on attach (M3) instead
+    /// of the raw byte-ring replay, so a full-screen app (vim, the agent TUI)
+    /// redraws cleanly; combined with `--write` it also runs the resize jiggle
+    /// that nudges the app to repaint. Without `--restore`, behavior is exactly
+    /// as before.
+    ///
     /// `hold-attach` is a back-compat alias.
     #[command(visible_alias = "hold-attach")]
     Attach {
@@ -95,6 +102,11 @@ enum Cmd {
         /// Request the writer lock (drive the session). Reader-only otherwise.
         #[arg(long, visible_alias = "take")]
         write: bool,
+
+        /// Request a clean vt100 screen repaint on attach (M3) rather than the
+        /// raw byte-ring replay — a full-screen app redraws cleanly.
+        #[arg(long)]
+        restore: bool,
     },
 
     /// One-shot: type a line at a held session (a momentary writer that releases
@@ -174,8 +186,9 @@ fn main() -> anyhow::Result<()> {
             uid,
             socket_dir,
             write,
+            restore,
         } => {
-            let code = attach(socket_dir.as_deref(), &uid, write)?;
+            let code = attach(socket_dir.as_deref(), &uid, write, restore)?;
             std::process::exit(code);
         }
         Cmd::HoldSend {

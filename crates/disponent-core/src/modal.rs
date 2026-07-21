@@ -407,7 +407,7 @@ impl EnvProvider for Modal {
         // tmux-in-container bootstrap that wraps it lives in `ModalCompute::spawn`.
         Some(crate::agent::LaunchSpec {
             agent_cmd: format!("claude {}", self.claude_flags),
-            brief_ref: "\"$(cat /tmp/disponent-brief.md)\"".to_string(),
+            brief_ref: Some("\"$(cat /tmp/disponent-brief.md)\"".to_string()),
         })
     }
 
@@ -560,6 +560,7 @@ mod tests {
             isolation: None,
             git_ref: None,
             fetch_remote: false,
+            agent_cmd: None,
             setup: Some("cargo build".into()),
             brief: "do the thing".into(),
             otel_endpoint: None,

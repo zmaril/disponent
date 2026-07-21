@@ -60,6 +60,11 @@ pub struct StartRequest {
     /// rather than off local HEAD. Only meaningful for worktree isolation on a
     /// local git repo; ignored otherwise (exe.dev / holder don't consult it).
     pub fetch_remote: bool,
+    /// Per-dispatch agent command line: when set it replaces the env default
+    /// and the local backend's `launch_spec` runs it VERBATIM with no brief
+    /// appended (teleport). Empty/None = env default + brief. Only the local
+    /// backend consults it today.
+    pub agent_cmd: Option<String>,
     /// Per-dispatch setup, run after the template's baseline and the clone.
     pub setup: Option<String>,
     pub brief: String,
@@ -258,7 +263,7 @@ impl EnvProvider for ExeDev {
         // command lives in `ExeCompute::spawn`.
         Some(crate::agent::LaunchSpec {
             agent_cmd: format!("claude {}", self.claude_flags),
-            brief_ref: "\"$(cat /tmp/disponent-brief.md)\"".to_string(),
+            brief_ref: Some("\"$(cat /tmp/disponent-brief.md)\"".to_string()),
         })
     }
 
@@ -978,6 +983,7 @@ mod tests {
             isolation: None,
             git_ref: None,
             fetch_remote: false,
+            agent_cmd: None,
             setup: setup.map(String::from),
             brief: "do the thing".into(),
             otel_endpoint: None,

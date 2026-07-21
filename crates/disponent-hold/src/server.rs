@@ -19,6 +19,14 @@
 //! held; a second Writer is admitted read-only (`writer_busy`). Only the
 //! writer's `Input`/`Resize` reach the pty; readers observe. `Signal` is an
 //! ungated control frame. The lock frees when the writer disconnects.
+//!
+//! Screen restore (M3, design §6/§7): alongside the byte-exact raw ring, the
+//! holder feeds every pty `Data` chunk into a live `shpool_vt100` screen and
+//! keeps it resized in lockstep with the pty. On attach a client that asked for
+//! `"restore":"screen"` gets that screen's `contents_formatted()` repaint
+//! instead of the raw ring, so a full-screen app (vim, the agent TUI) redraws
+//! cleanly. The default raw-ring replay — and the engine's resident `exact`
+//! observer, which never asks for restore — are byte-for-byte unchanged.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -33,7 +41,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::protocol::{self, encode_data_chunks, encode_server, Exit, Role, ServerKind};
+use crate::protocol::{self, encode_data_chunks, encode_server, Exit, Restore, Role, ServerKind};
 use crate::pty::{resize_master, write_master, Pty, WinSize};
 use crate::ring::Ring;
 
@@ -121,6 +129,15 @@ struct Client {
 /// bytes and no two-writer race at an attach boundary.
 struct Inner {
     ring: Ring,
+    /// The live vt100 screen model (M3): fed every pty `Data` chunk and resized
+    /// with the pty, so a human `"restore":"screen"` attach can be handed a clean
+    /// `contents_formatted()` repaint. Sizing: we track the pty's *actual*
+    /// rows/cols (not shpool's width-1024 pin) because the holder owns the pty
+    /// geometry and resizes this screen in lockstep, so `rows*cols` stays bounded
+    /// by the real terminal; scrollback is `0` — the raw ring is the scrollback
+    /// tier, this emulator holds exactly one screen for the repaint. The
+    /// width-1024 footgun (design §9) is avoided by that lockstep, not a pin.
+    screen: shpool_vt100::Parser,
     clients: Vec<Client>,
     /// The *published* exit: set by the reader once it has drained the pty to
     /// EOF and broadcast the `Exit` frame. Drives [`Holder::wait_for_exit`],
@@ -196,6 +213,10 @@ impl Holder {
             _master: master,
             inner: Mutex::new(Inner {
                 ring: Ring::new(config.ring_bytes),
+                // vt100 wants (rows, cols); 0 scrollback (one screen — see the
+                // `screen` field doc). Starts at the pty's launch geometry and
+                // is resized in lockstep by the writer's `Resize` frames.
+                screen: shpool_vt100::Parser::new(config.size.rows, config.size.cols, 0),
                 clients: Vec::new(),
                 exit: None,
                 reaped: None,
@@ -314,6 +335,10 @@ fn reader_loop(mut master: std::fs::File, shared: Arc<Shared>) {
                 encode_data_chunks(chunk, &mut frames);
                 let mut inner = shared.inner.lock().unwrap();
                 inner.ring.push(chunk);
+                // Feed the same bytes to the vt100 screen (M3) so a later
+                // human `"restore":"screen"` attach can be repainted. This is
+                // additive to the raw ring — the byte-exact tier is untouched.
+                inner.screen.process(chunk);
                 inner.clients.retain(|c| c.tx.send(frames.clone()).is_ok());
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -416,7 +441,7 @@ fn handle_client(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
     // 1. read the client's role request (the first line on the wire), then
     //    decide the grant under the lock so two concurrent Writer requests
     //    can't both win.
-    let requested = protocol::read_role_request(&mut stream)?;
+    let request = protocol::read_role_request(&mut stream)?;
 
     // 2. register + grant + replay atomically under the inner lock so no live
     //    byte is lost/duplicated and the writer lock is race-free.
@@ -426,18 +451,26 @@ fn handle_client(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         let id = inner.next_id;
         inner.next_id += 1;
         // Grant Writer only if none is held; otherwise admit as a Reader.
-        let granted = if requested == Role::Writer && inner.writer_id.is_none() {
+        let granted = if request.role == Role::Writer && inner.writer_id.is_none() {
             inner.writer_id = Some(id);
             Role::Writer
         } else {
             Role::Reader
         };
-        // Replay the ring first (byte-exact scrollback — the M0 tier; a vt100
-        // repaint for humans is M3).
-        let snapshot = inner.ring.snapshot();
-        if !snapshot.is_empty() {
+        // Restore buffer (design §6). Two tiers, one per consumer:
+        //  * `Raw` (default, and the engine's `exact` observer) — replay the
+        //    byte-exact ring: the scrollback bytes verbatim.
+        //  * `Screen` (opt-in, a human reattaching) — replay the vt100 screen's
+        //    `contents_formatted()` repaint so a full-screen app redraws cleanly
+        //    instead of vomiting the raw escape stream. `contents_formatted()`
+        //    is self-prefixed with show-cursor + SGR-reset + cursor-home + clear.
+        let restore_bytes = match request.restore {
+            Restore::Raw => inner.ring.snapshot(),
+            Restore::Screen => inner.screen.screen().contents_formatted(),
+        };
+        if !restore_bytes.is_empty() {
             let mut frames = Vec::new();
-            encode_data_chunks(&snapshot, &mut frames);
+            encode_data_chunks(&restore_bytes, &mut frames);
             let _ = tx.send(frames);
         }
         // If the child already exited, hand this late client its exit too.
@@ -451,7 +484,7 @@ fn handle_client(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
     // 3. reply with the granted role. `writer_busy` iff the client asked for
     //    Writer but was admitted read-only. Written before the writer thread
     //    starts, so it precedes every frame.
-    let writer_busy = requested == Role::Writer && granted != Role::Writer;
+    let writer_busy = request.role == Role::Writer && granted != Role::Writer;
     protocol::write_handshake_reply(&mut stream, granted, writer_busy)?;
 
     // 4. writer thread: drain the client's queue onto the socket.
@@ -499,6 +532,15 @@ fn client_input_loop(stream: &mut UnixStream, shared: &Arc<Shared>, role: Role) 
             }
             Some(ClientFrame::Resize { cols, rows }) => {
                 resize_master(shared.master_fd, cols, rows)?;
+                // Keep the vt100 screen (M3) in lockstep with the pty so a later
+                // `"restore":"screen"` repaint matches the current geometry.
+                shared
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .screen
+                    .screen_mut()
+                    .set_size(rows, cols);
             }
             Some(ClientFrame::Signal(sig)) => {
                 // Deliver to the child's whole process group (it's a session
