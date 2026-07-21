@@ -484,15 +484,27 @@ impl EnvProvider for LocalTmux {
         }))
     }
 
-    fn launch_spec(&self, _req: &StartRequest) -> Option<crate::agent::LaunchSpec> {
+    fn launch_spec(&self, req: &StartRequest) -> Option<crate::agent::LaunchSpec> {
         // The claude-code adapter composes the command; the env supplies its
         // config — the agent command line and where START wrote the brief. The
         // adapter's launch is `spawn`ed (as keystrokes) into the shell START
         // opened, with the brief `cat`-ed from the work dir at run time.
-        Some(crate::agent::LaunchSpec {
-            agent_cmd: self.agent_cmd.clone(),
-            brief_ref: "\"$(cat ../brief.md)\"".to_string(),
-        })
+        //
+        // A per-dispatch `agent_cmd` overrides the env default and runs VERBATIM
+        // with no brief appended (`brief_ref: None`) — a teleport launch
+        // (`claude --teleport <id>`) carries no prompt, so a stray brief token
+        // would corrupt it. Absent an override, keep today's behavior: the env
+        // agent with the brief `cat`-ed in.
+        match req.agent_cmd.as_deref().filter(|c| !c.is_empty()) {
+            Some(cmd) => Some(crate::agent::LaunchSpec {
+                agent_cmd: cmd.to_string(),
+                brief_ref: None,
+            }),
+            None => Some(crate::agent::LaunchSpec {
+                agent_cmd: self.agent_cmd.clone(),
+                brief_ref: Some("\"$(cat ../brief.md)\"".to_string()),
+            }),
+        }
     }
 
     fn reap(&self, handle: &serde_json::Value) -> anyhow::Result<()> {
@@ -1034,6 +1046,7 @@ mod tests {
             isolation: Some("worktree".into()),
             git_ref: Some("pm/task-1-demo".into()),
             fetch_remote: true,
+            agent_cmd: None,
             setup: None,
             brief: "b".into(),
             otel_endpoint: None,
@@ -1084,10 +1097,43 @@ mod tests {
             isolation: None,
             git_ref: None,
             fetch_remote: false,
+            agent_cmd: None,
             setup: None,
             brief: "b".into(),
             otel_endpoint: None,
         };
+        assert_eq!(
+            b.launch_spec(&req).unwrap().command(),
+            "myagent --flag \"$(cat ../brief.md)\""
+        );
+    }
+
+    #[test]
+    fn per_dispatch_agent_cmd_runs_verbatim_without_the_brief() {
+        // A per-dispatch agent_cmd (teleport, e.g. `claude --teleport <id>`)
+        // replaces the env agent and is launched VERBATIM — the brief must NOT
+        // be appended, or a prompt-less launch would be corrupted.
+        let b = LocalTmux::sandboxed("s", PathBuf::from("/tmp/x"), "myagent --flag");
+        let mut req = StartRequest {
+            session_uid: "u".into(),
+            template: None,
+            repo: None,
+            isolation: None,
+            git_ref: None,
+            fetch_remote: false,
+            agent_cmd: Some("echo teleport-ok".into()),
+            setup: None,
+            brief: "b".into(),
+            otel_endpoint: None,
+        };
+        let cmd = b.launch_spec(&req).unwrap().command();
+        assert_eq!(cmd, "echo teleport-ok", "agent_cmd runs verbatim");
+        assert!(
+            !cmd.contains("cat ../brief.md") && !cmd.contains("myagent"),
+            "no brief appended and the env default is overridden: {cmd}"
+        );
+        // An empty agent_cmd is treated as absent → env default + brief.
+        req.agent_cmd = Some(String::new());
         assert_eq!(
             b.launch_spec(&req).unwrap().command(),
             "myagent --flag \"$(cat ../brief.md)\""
