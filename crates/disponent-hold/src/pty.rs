@@ -157,16 +157,21 @@ fn open_pty(size: WinSize) -> io::Result<(OwnedFd, OwnedFd)> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    // SAFETY: out-params are valid locals; termios null = defaults; &mut ws
-    // valid. The winsize/termios params are `*mut` on Apple's libc but `*const`
-    // on Linux's; passing `*mut` (which coerces to `*const`) satisfies both.
+    // The winsize/termios params are `*mut` on Apple's libc but `*const` on
+    // Linux's. A `*mut` raw pointer coerces to `*const`, so passing one
+    // satisfies both platforms; going through a pointer local (rather than
+    // `&mut ws` at the call site) also avoids Linux clippy's
+    // `unnecessary_mut_passed`, since there the param is `*const`.
+    let ws_ptr: *mut libc::winsize = &mut ws;
+    // SAFETY: out-params are valid locals; termios null = defaults; ws_ptr is a
+    // valid winsize pointer for the duration of the call.
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut ws,
+            ws_ptr,
         )
     };
     if rc == -1 {
