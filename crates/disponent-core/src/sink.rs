@@ -115,7 +115,7 @@ impl Sink {
         let mut q = conn.prepare(
             "SELECT id, created_at, title, brief, repo, git_ref, isolation, template_name, \
              setup, env_slug, agent_name, model_id, timeout_secs, max_budget, labels, tags, \
-             fetch_remote \
+             fetch_remote, agent_cmd \
              FROM dispatches ORDER BY rowid",
         )?;
         let rows = q.query_map([], |r| {
@@ -137,6 +137,7 @@ impl Sink {
                 "labels": jsonv(text(r, 14)),
                 "tags": jsonv(text(r, 15)),
                 "fetchRemote": r.get::<_, Option<bool>>(16).ok().flatten(),
+                "agentCmd": text(r, 17),
             }))
             .expect("a stored dispatch row deserializes");
             Ok(RestoredDispatch {
