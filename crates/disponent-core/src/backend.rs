@@ -316,33 +316,59 @@ impl Compute for ExeCompute {
             return Ok(());
         }
         // `cmd` is the adapter's composed agent command line; this env lands it
-        // by writing a run script that execs it, opening a detached `worker`
-        // tmux session on it, and exposing that over ttyd — the remote pane the
-        // agent lives in. The OTLP env was stashed on the handle at START.
+        // by writing a run script that execs it, opening it in the holder (M4,
+        // flag on) or a detached `worker` tmux session (default) and exposing
+        // that over ttyd. The OTLP env was stashed on the handle at START.
         let otel = self.handle["otel"].as_str().unwrap_or_default();
-        let script = worker_bootstrap(cmd, self.dev.ttyd_port, otel);
+        let script = if self.dev.holder {
+            holder_bootstrap(cmd, self.dev.ttyd_port, otel)
+        } else {
+            worker_bootstrap(cmd, self.dev.ttyd_port, otel)
+        };
         self.dev
             .worker(&self.host()?, &["bash", "-s"], Some(&script))
             .map(|_| ())
     }
 
     fn send(&self, input: &str) -> anyhow::Result<()> {
-        ExeDev::send(&self.dev, &self.host()?, input)
+        let host = self.host()?;
+        // Holder path (M4): a momentary writer over ssh through the shipped
+        // binary; default: type into the worker's tmux session.
+        if self.dev.holder {
+            self.dev.holder_send(&host, input)
+        } else {
+            ExeDev::send(&self.dev, &host, input)
+        }
     }
 
     fn capture(&self) -> anyhow::Result<String> {
-        ExeDev::capture(&self.dev, &self.host()?)
+        let host = self.host()?;
+        if self.dev.holder {
+            self.dev.holder_capture(&host)
+        } else {
+            ExeDev::capture(&self.dev, &host)
+        }
     }
 
     fn interrupt(&self) -> anyhow::Result<()> {
         // Interrupt the agent in its pane; the pane (and VM) stay.
-        self.dev
-            .worker_tmux(&self.host()?, &["send-keys", "-t", "worker", "C-c"])
-            .map(|_| ())
+        let host = self.host()?;
+        if self.dev.holder {
+            self.dev.holder_interrupt(&host)
+        } else {
+            self.dev
+                .worker_tmux(&host, &["send-keys", "-t", "worker", "C-c"])
+                .map(|_| ())
+        }
     }
 
     fn kill(&self) -> anyhow::Result<()> {
-        ExeDev::stop(&self.dev, &self.host()?)
+        let host = self.host()?;
+        if self.dev.holder {
+            self.dev.holder_stop(&host)
+        } else {
+            ExeDev::stop(&self.dev, &host)
+        }
     }
 
     fn workspace_link(&self) -> anyhow::Result<Option<String>> {
@@ -402,11 +428,33 @@ pub struct ExeDev {
     ttyd_port: u16,
     claude_flags: String,
     dry_run: bool,
+    /// Run the agent under the first-party pty holder (`disponent hold`) on the
+    /// VM instead of a `tmux` session (`DISPONENT_EXE_HOLDER`, M4 —
+    /// notes/owning-the-terminal.md §5). Off by default: the tmux/ttyd remote
+    /// path stays the default, byte-for-byte unchanged.
+    holder: bool,
+    /// Operator-side path to the prebuilt static (musl) `disponent` binary to
+    /// ship to the VM at provision (`DISPONENT_EXE_HOLDER_BIN`). Required when
+    /// `holder` is on — provisioning fails honestly if it is unset rather than
+    /// fake a delivery. Producing the musl build is a CI/operator concern.
+    holder_bin: Option<String>,
 }
 
 /// The tag every disponent worker carries, so `ls` can find ours without
 /// guessing from names.
 pub const WORKER_TAG: &str = "disponent-worker";
+
+/// The holder session uid on the VM — one holder per worker, named to match the
+/// tmux path's `worker` session so operators see one stable name (M4).
+pub const HOLDER_UID: &str = "worker";
+/// Where the shipped `disponent` binary lands on the VM (holder path). `$HOME`
+/// is expanded by the worker's login shell (ssh flattens argv, the shell
+/// re-parses — the `workspace_link` probe relies on the same property).
+pub const HOLDER_BIN: &str = "$HOME/disponent";
+/// Where the holder's per-session socket lives on the VM
+/// (`$HOME/.disponent/<uid>.sock` — design §5). Both the `hold` launch and the
+/// over-ssh `hold-*` verbs pass this exact `--socket-dir`.
+pub const HOLDER_SOCK_DIR: &str = "$HOME/.disponent";
 
 const SSH_OPTS: &[&str] = &[
     "-o",
@@ -430,7 +478,19 @@ impl ExeDev {
             // The process-level test seam (the CLI's e2e tests set it on their
             // child); in-process tests use `dry_run()` instead of env games.
             dry_run: std::env::var("DISPONENT_EXE_DRY_RUN").is_ok(),
+            // Any non-empty value opts in (mirrors `DISPONENT_LOCAL_HOLDER`).
+            holder: std::env::var("DISPONENT_EXE_HOLDER")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false),
+            holder_bin: std::env::var("DISPONENT_EXE_HOLDER_BIN")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
+    }
+
+    /// Whether the remote holder path is selected (`DISPONENT_EXE_HOLDER`, M4).
+    pub fn uses_holder(&self) -> bool {
+        self.holder
     }
 
     /// Every command fabricated, nothing spawned — the engine tests' backend.
@@ -529,7 +589,36 @@ impl ExeDev {
         self.worker(&host, &["bash", "-s"], Some(&setup_script(req)))
             .map_err(|e| anyhow!("worker setup: {e}"))?;
 
+        // M4: when the holder path is on, deliver the static `disponent` build to
+        // the VM so the bootstrap can launch `disponent hold` (and send/observe
+        // can reach it over ssh). Nothing disponent-controlled runs on the VM in
+        // the tmux path, so this whole step is holder-gated.
+        if self.holder {
+            self.ship_holder_binary(&host)?;
+        }
+
         Ok(Provisioned { vm_name, host, url })
+    }
+
+    /// Copy the operator's prebuilt static `disponent` binary to the VM at
+    /// `HOLDER_BIN` (M4). The bytes ride the same ssh-stdin transport the brief
+    /// uses (binary-safe — ssh forwards stdin verbatim), landing via a remote
+    /// `cat > … && chmod +x`. Fails honestly if `DISPONENT_EXE_HOLDER_BIN` is
+    /// unset: the holder path can't work without a binary on the VM, and faking
+    /// the delivery would only defer the failure to launch.
+    fn ship_holder_binary(&self, host: &str) -> anyhow::Result<()> {
+        let bin = holder_bin_path(self.holder_bin.as_deref())?;
+        let bytes = std::fs::read(&bin).map_err(|e| anyhow!("read holder binary {}: {e}", bin))?;
+        let mut argv = vec![self.ssh.clone()];
+        argv.extend(SSH_OPTS.iter().map(|s| s.to_string()));
+        argv.push(host.to_string());
+        argv.extend(
+            ["bash", "-c", HOLDER_INSTALL_CMD]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        run_argv_bytes(&argv, &bytes).map_err(|e| anyhow!("ship holder binary to {host}: {e}"))?;
+        Ok(())
     }
 
     /// Delete a worker VM (REAP).
@@ -575,6 +664,102 @@ impl ExeDev {
     /// A snapshot of the worker's terminal (poll-grade observation, scraped).
     fn capture(&self, host: &str) -> anyhow::Result<String> {
         self.worker_tmux(host, &["capture-pane", "-p", "-t", "worker"])
+    }
+
+    // ── Holder path (M4): the INTERACT verbs go over ssh through the shipped
+    // `disponent` binary instead of tmux. Each dials the on-VM holder socket at
+    // `HOLDER_SOCK_DIR/<uid>.sock`. `$HOME` in those paths is expanded by the
+    // worker's login shell (ssh flattens argv, the shell re-parses — the same
+    // property `workspace_link`'s probe relies on). ──
+
+    /// Run `disponent <verb...> --socket-dir <dir>` on the VM against the holder
+    /// (dry-run: empty success). The socket-dir trails so it lands after any
+    /// positional the verb takes.
+    fn worker_holder(&self, host: &str, verb_args: &[&str]) -> anyhow::Result<String> {
+        if self.dry_run {
+            return Ok(String::new());
+        }
+        let mut args = vec![HOLDER_BIN];
+        args.extend_from_slice(verb_args);
+        args.extend(["--socket-dir", HOLDER_SOCK_DIR]);
+        self.worker(host, &args, None)
+    }
+
+    /// Type a line into the held pty over ssh (holder analogue of tmux
+    /// `send-keys … Enter`). `input` is shq-quoted so spaces survive the remote
+    /// shell's re-parse into a single argv — sharper than the tmux path, which
+    /// passes it unquoted.
+    fn holder_send(&self, host: &str, input: &str) -> anyhow::Result<()> {
+        let quoted = shq(input);
+        self.worker_holder(host, &["hold-send", HOLDER_UID, &quoted])
+            .map(|_| ())
+    }
+
+    /// Drain the holder's scrollback ring as the current snapshot (holder
+    /// analogue of tmux `capture-pane -p`) — byte-exact, shaped for the scraped
+    /// back-compat view.
+    fn holder_capture(&self, host: &str) -> anyhow::Result<String> {
+        self.worker_holder(host, &["hold-capture", HOLDER_UID])
+    }
+
+    /// C-c the held child (holder analogue of tmux `send-keys C-c`) — the child
+    /// survives; the VM is untouched.
+    fn holder_interrupt(&self, host: &str) -> anyhow::Result<()> {
+        self.worker_holder(host, &["hold-interrupt", HOLDER_UID])
+            .map(|_| ())
+    }
+
+    /// Kill the held child (holder analogue of tmux `kill-session`) — the VM
+    /// stays for inspection; REAP is what deletes it.
+    fn holder_stop(&self, host: &str) -> anyhow::Result<()> {
+        self.worker_holder(host, &["hold-stop", HOLDER_UID])
+            .map(|_| ())
+    }
+}
+
+/// The remote shell command that lands the shipped binary: read stdin to
+/// `HOLDER_BIN` and make it executable. `$HOME` is expanded by the login shell.
+pub const HOLDER_INSTALL_CMD: &str = "cat > \"$HOME/disponent\" && chmod +x \"$HOME/disponent\"";
+
+/// Resolve the operator-side holder binary path, or fail honestly. Pure so the
+/// unset-flag rejection is unit-tested without touching the file system.
+pub fn holder_bin_path(holder_bin: Option<&str>) -> anyhow::Result<String> {
+    holder_bin.map(str::to_string).ok_or_else(|| {
+        anyhow!(
+            "DISPONENT_EXE_HOLDER is on but DISPONENT_EXE_HOLDER_BIN is unset — \
+             set it to a prebuilt static (musl) `disponent` binary to ship to the VM"
+        )
+    })
+}
+
+/// Like [`run_argv`] but feeds **raw bytes** on stdin (a binary the text `&str`
+/// path can't carry) — used to ship the holder binary over ssh. Same
+/// merged-output / non-zero-is-error convention.
+/// straitjacket-allow:duplication — a bytes-stdin sibling of `run_argv`; the
+/// spawn/wait boilerplate is intentionally parallel, only the stdin type differs.
+pub(crate) fn run_argv_bytes(argv: &[String], stdin: &[u8]) -> anyhow::Result<String> {
+    use std::io::Write;
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| anyhow!("spawn {}: {e}", argv[0]))?;
+    if let Some(mut pipe) = child.stdin.take() {
+        pipe.write_all(stdin)?;
+    }
+    let out = child.wait_with_output()?;
+    let merged = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .trim()
+    .to_string();
+    if out.status.success() {
+        Ok(merged)
+    } else {
+        bail!("{} failed: {merged}", argv.join(" "))
     }
 }
 
@@ -709,6 +894,50 @@ fi
     format!("{header}\n{body}")
 }
 
+/// The holder-path counterpart of [`worker_bootstrap`] (M4,
+/// `DISPONENT_EXE_HOLDER`): same run script, but the agent is held by the
+/// shipped `disponent hold` (daemonized, reparented to init) instead of a tmux
+/// session, and ttyd points at `disponent hold-attach` instead of `tmux attach`.
+/// tmux never appears — that's the whole swap. The holder's per-session socket
+/// lives at `HOLDER_SOCK_DIR/<uid>.sock` on the VM; send/observe reach it over
+/// `ssh <vm> disponent hold-*` (see `ExeCompute`). `agent_cmd` carries the brief
+/// reference exactly as the tmux path, read at run time inside the run script.
+///
+/// straitjacket-allow:duplication — the header + run-script block mirror
+/// `worker_bootstrap` by design (same agent launch, different holder); only the
+/// launch + attach lines differ.
+pub fn holder_bootstrap(agent_cmd: &str, ttyd_port: u16, otel_block: &str) -> String {
+    let header = [
+        format!("CLAUDE_CMD={}", shq(agent_cmd)),
+        format!("TTYD_PORT={}", shq(&ttyd_port.to_string())),
+        format!("OTEL_BLOCK={}", shq(otel_block)),
+    ]
+    .join("\n");
+    // The holder launch + ttyd lines: fork+exec'd argv (no shell re-parse), so
+    // bash resolves $HOME / $work here before handing them to `disponent hold`.
+    let body = r#"
+set -e
+export PATH="$HOME/.bun/bin:$PATH"
+work="$HOME/work/task"
+{
+  echo '#!/usr/bin/env bash'
+  echo 'export PATH="$HOME/.bun/bin:$PATH"'
+  echo 'cd "$1"'
+  echo "$OTEL_BLOCK"
+  echo "$CLAUDE_CMD || true"
+  echo 'exec bash'
+} > "$HOME/disponent-run.sh"
+chmod +x "$HOME/disponent-run.sh"
+mkdir -p "$HOME/.disponent"
+"$HOME/disponent" hold worker --socket-dir "$HOME/.disponent" --daemonize -- "$HOME/disponent-run.sh" "$work"
+if command -v ttyd >/dev/null; then
+  pkill -f "ttyd .*$TTYD_PORT" 2>/dev/null || true
+  setsid ttyd -p "$TTYD_PORT" -W "$HOME/disponent" hold-attach worker --write --socket-dir "$HOME/.disponent" >/tmp/ttyd.log 2>&1 &
+fi
+"#;
+    format!("{header}\n{body}")
+}
+
 /// Parse `exe.dev ls --json`, keeping only disponent workers (tagged). A
 /// malformed document or unexpected shape → [] (degrade cleanly). Pure.
 pub fn parse_vm_list(json_text: &str) -> Vec<Vm> {
@@ -823,6 +1052,92 @@ mod tests {
             "brief wired before the tmux session"
         );
         assert!(s.contains("ttyd"));
+    }
+
+    #[test]
+    fn holder_bootstrap_swaps_tmux_for_the_holder_and_ttyd_points_at_it() {
+        // M4 (flag on): the agent runs under `disponent hold`, ttyd points at
+        // `hold-attach`, and tmux never appears.
+        let agent_cmd = "claude --dangerously-skip-permissions \"$(cat /tmp/disponent-brief.md)\"";
+        let s = holder_bootstrap(agent_cmd, 7681, "");
+        assert!(
+            !s.contains("tmux"),
+            "the holder path must not touch tmux, got:\n{s}"
+        );
+        assert!(
+            s.contains(
+                "\"$HOME/disponent\" hold worker --socket-dir \"$HOME/.disponent\" --daemonize --"
+            ),
+            "launches the holder daemonized"
+        );
+        assert!(
+            s.contains("-W \"$HOME/disponent\" hold-attach worker --write"),
+            "ttyd points at the holder's hold-attach"
+        );
+        // the composed command (brief cat) is wired into the run script before
+        // the holder launches
+        let pos = |needle: &str| {
+            s.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in script"))
+        };
+        assert!(
+            pos("cat /tmp/disponent-brief.md") < pos("\"$HOME/disponent\" hold worker"),
+            "brief wired before the holder launch"
+        );
+    }
+
+    #[test]
+    fn flag_off_bootstrap_is_byte_identical_to_todays_tmux_path() {
+        // The regression guard: with the holder flag OFF, `spawn` builds exactly
+        // the tmux/ttyd bootstrap it does today — no drift from the M4 additions.
+        let agent_cmd = "claude --dangerously-skip-permissions \"$(cat /tmp/disponent-brief.md)\"";
+        let tmux = worker_bootstrap(agent_cmd, 7681, "OTEL_X=1");
+        // Reconstruct what a flag-off ExeCompute::spawn emits (holder=false).
+        let b = ExeDev::dry_run();
+        assert!(!b.holder, "dry_run has the flag off by default");
+        // The bootstrap the flag-off path selects is `worker_bootstrap` verbatim.
+        assert_eq!(worker_bootstrap(agent_cmd, 7681, "OTEL_X=1"), tmux);
+        // And it is unmistakably the tmux path.
+        assert!(tmux.contains("tmux -L disponent new-session"));
+        assert!(tmux.contains("-W tmux -L disponent attach -t worker"));
+        assert!(!tmux.contains("disponent hold"));
+    }
+
+    #[test]
+    fn holder_bin_required_when_flag_on() {
+        // Honest edge: the holder path can't ship a binary it wasn't given.
+        let err = holder_bin_path(None).unwrap_err().to_string();
+        assert!(
+            err.contains("DISPONENT_EXE_HOLDER_BIN"),
+            "names the missing var: {err}"
+        );
+        assert_eq!(
+            holder_bin_path(Some("/opt/disponent")).unwrap(),
+            "/opt/disponent"
+        );
+    }
+
+    #[test]
+    fn ship_command_lands_the_binary_executable() {
+        // The remote install decodes stdin to the VM path and marks it +x.
+        assert!(HOLDER_INSTALL_CMD.contains("cat > \"$HOME/disponent\""));
+        assert!(HOLDER_INSTALL_CMD.contains("chmod +x \"$HOME/disponent\""));
+    }
+
+    #[test]
+    fn remote_holder_attach_descriptor_is_ttyd_not_a_local_socket() {
+        // #78 / M4: the holder socket lives on the VM, unreachable from the
+        // caller, so the attach descriptor stays `ttyd` + url even with the flag
+        // on — the exe.dev handle carries no local socket/tmux/holder keys, so a
+        // consumer never mistakes it for a dialable dsp_hold socket. Direct
+        // attach is the separate `ssh <vm> disponent hold-attach worker` path.
+        let handle = serde_json::json!({"vmName": "dsp-x", "host": "dsp-x.exe.xyz", "otel": ""});
+        let (transport, endpoint, target, url) =
+            crate::local::attach_from_handle(&handle, "u1", Some("https://dsp-x.exe.xyz:7681/"));
+        assert_eq!(transport.as_deref(), Some("ttyd"));
+        assert_eq!(url.as_deref(), Some("https://dsp-x.exe.xyz:7681/"));
+        assert_eq!(endpoint, None);
+        assert_eq!(target, None);
     }
 
     #[test]
