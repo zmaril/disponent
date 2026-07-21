@@ -10,6 +10,16 @@
 //! stdin as `Input` frames, and tracks `SIGWINCH` into `Resize` frames. When the
 //! writer is already held it prints a notice and stays read-only. Either way it
 //! exits propagating the child's code when the `Exit` frame arrives.
+//!
+//! Screen restore (M3, design §6/§7): [`attach`]'s `restore` flag (and
+//! [`Client::connect_restore`]) asks the holder for a clean vt100
+//! `contents_formatted()` repaint on attach instead of the raw byte ring, so a
+//! full-screen app (vim, the agent TUI) redraws cleanly rather than replaying a
+//! garbage escape stream. A restore attach that also holds the writer runs the
+//! resize [`Client::resize_jiggle`] so the app emits a fresh repaint. Absent the
+//! flag, the client requests raw-ring replay — exactly today's behavior — and
+//! the engine's resident observer never asks for restore, so its `exact` frames
+//! stay raw.
 
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
@@ -21,7 +31,7 @@ use anyhow::{Context, Result};
 
 use crate::protocol::{
     encode_client, encode_resize, encode_signal, read_handshake_reply, read_server_frame,
-    write_role_request, ClientKind, Exit, Role, ServerFrame,
+    write_role_request, ClientKind, Exit, Restore, Role, ServerFrame,
 };
 use crate::server::socket_path;
 
@@ -44,11 +54,22 @@ impl Client {
     /// Connect requesting `role`, exchanging the handshake. A denied Writer is
     /// admitted read-only — inspect [`Client::granted_role`] /
     /// [`Client::writer_busy`] (this does not error on denial;
-    /// [`Client::connect_writer`] does).
+    /// [`Client::connect_writer`] does). Restore mode is the byte-exact raw ring
+    /// (the default); [`Client::connect_restore`] opts into a screen repaint.
     pub fn connect_as(path: &Path, role: Role) -> Result<Client> {
+        Client::connect_restore(path, role, Restore::Raw)
+    }
+
+    /// Connect requesting `role` and a specific `restore` mode (design §6/§7).
+    /// [`Restore::Raw`] (the default everywhere else) replays the byte-exact
+    /// ring; [`Restore::Screen`] asks the holder for a clean vt100 repaint on
+    /// attach so a full-screen app redraws — the opt-in human path. All the
+    /// other `connect*` constructors keep [`Restore::Raw`], so the engine's
+    /// resident observer and every existing caller are unchanged.
+    pub fn connect_restore(path: &Path, role: Role, restore: Restore) -> Result<Client> {
         let mut stream =
             UnixStream::connect(path).with_context(|| format!("connect {}", path.display()))?;
-        write_role_request(&mut stream, role).context("send role request")?;
+        write_role_request(&mut stream, role, restore).context("send role request")?;
         let reply = read_handshake_reply(&mut stream).context("read handshake")?;
         Ok(Client {
             stream,
@@ -77,6 +98,17 @@ impl Client {
     /// Connect by uid requesting `role` (a denied Writer is admitted read-only).
     pub fn connect_uid_as(socket_dir: Option<&Path>, uid: &str, role: Role) -> Result<Client> {
         Client::connect_as(&socket_path(socket_dir, uid), role)
+    }
+
+    /// Connect by uid requesting `role` and a specific `restore` mode — the
+    /// screen-restore entry the `disponent attach --restore` CLI uses.
+    pub fn connect_uid_restore(
+        socket_dir: Option<&Path>,
+        uid: &str,
+        role: Role,
+        restore: Restore,
+    ) -> Result<Client> {
+        Client::connect_restore(&socket_path(socket_dir, uid), role, restore)
     }
 
     /// Connect by uid requesting the writer lock, erroring if it is held.
@@ -112,6 +144,19 @@ impl Client {
         self.stream.write_all(&encode_resize(cols, rows))?;
         self.stream.flush()?;
         Ok(())
+    }
+
+    /// The screen-restore "emacs jiggle" (design §6/§7, shpool `shell.rs`
+    /// reattach): resize the pty one cell too big, pause ~50 ms, then resize to
+    /// the real `cols`/`rows`. The doubled `SIGWINCH` nudges a full-screen app
+    /// (vim, the agent TUI) to emit a fresh full repaint at the correct size —
+    /// pure empirical terminal lore. A writer act (resize is writer-gated), so
+    /// this is only meaningful when this client holds the writer lock; it is
+    /// invoked only on the `--restore` attach path.
+    pub fn resize_jiggle(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.send_resize(cols.saturating_add(1), rows.saturating_add(1))?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        self.send_resize(cols, rows)
     }
 
     /// Send a detach frame (the holder drops us cleanly).
@@ -282,9 +327,20 @@ fn win_size(fd: RawFd) -> Option<(u16, u16)> {
 /// writer lock and, when granted, forwards stdin + `SIGWINCH`; when the writer
 /// is already held it prints a notice and stays read-only. Restores the terminal
 /// before returning on every path.
-pub fn attach(socket_dir: Option<&Path>, uid: &str, write: bool) -> Result<i32> {
+///
+/// With `restore = true` (the `--restore` flag, M3) it asks the holder for a
+/// clean vt100 screen repaint on attach instead of the raw byte ring, so a
+/// full-screen app redraws cleanly; when it also holds the writer it performs
+/// the resize "jiggle" so the app emits a fresh repaint. With `restore = false`
+/// the behavior is exactly as before — the byte-exact raw-ring replay.
+pub fn attach(socket_dir: Option<&Path>, uid: &str, write: bool, restore: bool) -> Result<i32> {
     let role = if write { Role::Writer } else { Role::Reader };
-    let client = Client::connect_uid_as(socket_dir, uid, role)?;
+    let restore_mode = if restore {
+        Restore::Screen
+    } else {
+        Restore::Raw
+    };
+    let client = Client::connect_uid_restore(socket_dir, uid, role, restore_mode)?;
     let holding_writer = client.granted_role() == Role::Writer;
     if write && !holding_writer {
         eprintln!(
@@ -313,9 +369,15 @@ pub fn attach(socket_dir: Option<&Path>, uid: &str, write: bool) -> Result<i32> 
         }
 
         // Send the initial size so the child matches this terminal immediately.
+        // On a `--restore` attach do the emacs jiggle instead (resize one cell
+        // too big, ~50 ms, then real) so the full-screen app repaints cleanly.
         let mut writer = client.try_clone()?;
         if let Some((cols, rows)) = win_size(stdout_fd) {
-            let _ = writer.send_resize(cols, rows);
+            if restore {
+                let _ = writer.resize_jiggle(cols, rows);
+            } else {
+                let _ = writer.send_resize(cols, rows);
+            }
         }
 
         // stdin → Input frames (background; dies with the process on exit).

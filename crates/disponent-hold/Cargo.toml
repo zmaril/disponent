@@ -9,3 +9,8 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 libc = { workspace = true }
+# The VT100 screen model for human screen-restore on reattach (design §6/§7).
+# Pure Rust, MIT — the same emulator shpool uses for reattach repaint, with
+# `Screen::contents_formatted()`. Free musl cross-compile (cargo-native, no
+# toolchain), swappable for `libghostty-vt` later behind the restore seam.
+shpool_vt100 = "0.1.3"
