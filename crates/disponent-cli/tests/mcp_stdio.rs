@@ -254,7 +254,11 @@ fn supervisor_walks_the_whole_flow() {
 fn worker_surface_is_readonly_plus_send_ack_and_nothing_that_recurses() {
     let mut server = Server::start("worker");
 
-    let names = server.tool_names();
+    let tools = server.request("tools/list", json!({}))["tools"].clone();
+    let tools = tools.as_array().unwrap();
+    let name_of = |t: &Value| t["name"].as_str().unwrap().to_string();
+    let names: Vec<String> = tools.iter().map(name_of).collect();
+
     // The worker surface is EXACTLY the read-only observe tools plus the two
     // self-scoped writes (send up to its Manager, ack on its own inbox).
     assert_eq!(
@@ -274,6 +278,29 @@ fn worker_surface_is_readonly_plus_send_ack_and_nothing_that_recurses() {
         ],
         "observe-only + the two self-scoped writes"
     );
+
+    // The gate is schema-driven: every tool on the worker surface carries
+    // `readOnlyHint` (observe) or `workerHint` (a `#[fluessig(worker)]` op), and
+    // the two writes are on the surface BECAUSE they carry `workerHint` — not a
+    // hardcoded name list.
+    for t in tools {
+        let ann = &t["annotations"];
+        assert!(
+            ann["readOnlyHint"] == json!(true) || ann["workerHint"] == json!(true),
+            "{} is on the worker surface without readOnlyHint/workerHint",
+            name_of(t)
+        );
+    }
+    for t in tools {
+        if name_of(t) == "disponent_send" || name_of(t) == "disponent_ack" {
+            assert_eq!(
+                t["annotations"]["workerHint"],
+                json!(true),
+                "{} must carry the workerHint flag",
+                name_of(t)
+            );
+        }
+    }
 
     // The no-recursion invariant, stated as tool ABSENCE: nothing that
     // dispatches, spawns, tears down, or otherwise drives another session is on

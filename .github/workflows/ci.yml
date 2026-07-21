@@ -74,7 +74,7 @@ jobs:
           # Rust-derive front end (union authoring + readonly/destructive op
           # hints). disponent's schema is now authored in crates/disponent-schema
           # (the derive front end) — there is no TypeSpec or Node in this chain.
-          FLUESSIG_REF: d1a4eca8b1940967393646f09415f9f6ee760063
+          FLUESSIG_REF: 0856fe546cb0e5c547ea8cba0bb0ff281012b28c
         run: |
           # Clone into RUNNER_TEMP (outside the workspace) so it can't register
           # as drift in the git-clean check below. Fetch the pinned SHA directly
