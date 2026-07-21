@@ -11,9 +11,10 @@
 //! stream, let a client declare a **role** — `reader` (default) or `writer` —
 //! and let the holder grant or deny the single writer lock:
 //!
-//! 1. **client → holder**: `{"role":"writer"}\n` (or `"reader"`). The role is
-//!    the only field the holder reads; a missing/unknown role is the safe
-//!    read-only default.
+//! 1. **client → holder**: `{"role":"writer"}\n` (or `"reader"`), optionally
+//!    with a `"restore":"screen"` field. The holder reads the role and the
+//!    restore mode; a missing/unknown role is the safe read-only default, and a
+//!    missing/unknown restore is the byte-exact raw-ring default.
 //! 2. **holder → client**: `{"role":"writer","writer_busy":false}\n`. The
 //!    `role` here is the one *actually granted* — a Writer request is admitted
 //!    as a `reader` with `writer_busy:true` when another writer already holds
@@ -21,7 +22,19 @@
 //!
 //! (JSON lines chosen to match disponent's stdio-JSON idiom and to carry the
 //! role/grant without a wire break.) The handshake is unversioned: every
-//! consumer is in-repo, so the wire format changes in place.
+//! consumer is in-repo, so the wire format changes in place ([[no-wire-versioning-yet]]).
+//!
+//! ## Restore mode (screen repaint — design §6/§7, M3)
+//!
+//! By default (`"restore"` absent, or on any client that predates the field —
+//! e.g. pm's `{"role":"writer"}`) the holder replays the byte-exact **raw ring**
+//! on attach: the M0 scrollback tier, and the ONLY thing the engine's resident
+//! observer ever receives — its `exact` `raw` frames must stay raw, never a
+//! repaint. When a *human* asks for `"restore":"screen"`, the holder instead
+//! sends a clean **vt100 screen repaint** (`shpool_vt100::Screen::contents_formatted()`,
+//! self-prefixed with show-cursor + SGR-reset + cursor-home + clear) so vim / the
+//! agent TUI redraw cleanly rather than replaying a garbage escape stream. The
+//! choice is per-attach and opt-in; absent restore is exactly today's behavior.
 //!
 //! **Enforcement.** Only the writer's `Input`/`Resize` frames reach the pty; a
 //! reader's are ignored (its keystrokes are a no-op). `Signal` is a *control*
@@ -84,6 +97,30 @@ impl Role {
             Role::Writer => "writer",
         }
     }
+}
+
+/// The screen-restore mode a client requests on attach (design §6/§7, M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Restore {
+    /// Byte-exact raw-ring replay — the M0 scrollback tier. The default, and the
+    /// ONLY mode the engine's resident observer uses: exact `raw` frames stay
+    /// raw, never a repaint. This is what an absent/unknown `"restore"` field
+    /// (and every pre-M3 client, e.g. pm) selects — today's behavior verbatim.
+    #[default]
+    Raw,
+    /// A clean vt100 screen repaint (`contents_formatted()`) for a human
+    /// reattaching to a full-screen app (M3). Opt-in via `"restore":"screen"`.
+    Screen,
+}
+
+/// A client's decoded handshake request: the role it wants and the restore mode
+/// it wants on attach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoleRequest {
+    /// The role requested (`Reader` default; a `Writer` may be denied → Reader).
+    pub role: Role,
+    /// The restore mode requested (`Raw` default — byte-exact ring replay).
+    pub restore: Restore,
 }
 
 /// The holder's handshake reply to a connecting client.
@@ -287,22 +324,47 @@ fn json_role(line: &str) -> Role {
     }
 }
 
+/// The restore mode a handshake line declares; anything but an explicit
+/// `"screen"` is the byte-exact raw-ring default (so a pre-M3 client with no
+/// `"restore"` field keeps getting raw replay).
+fn json_restore(line: &str) -> Restore {
+    if line.contains("\"restore\":\"screen\"") {
+        Restore::Screen
+    } else {
+        Restore::Raw
+    }
+}
+
 /// Whether a `"<key>":true` flag is present in a handshake line.
 fn json_flag(line: &str, key: &str) -> bool {
     line.contains(&format!("\"{key}\":true"))
 }
 
 /// Write the client's role-request line (client → holder) — the first bytes on
-/// the wire after connect, before any frame.
-pub fn write_role_request<W: Write>(w: &mut W, role: Role) -> io::Result<()> {
-    writeln!(w, "{{\"role\":\"{}\"}}", role.as_wire())?;
+/// the wire after connect, before any frame. The `"restore"` field is emitted
+/// only for [`Restore::Screen`]; a [`Restore::Raw`] request stays byte-identical
+/// to the pre-M3 line (`{"role":"…"}`), so pm's existing handshake is unchanged.
+pub fn write_role_request<W: Write>(w: &mut W, role: Role, restore: Restore) -> io::Result<()> {
+    match restore {
+        Restore::Raw => writeln!(w, "{{\"role\":\"{}\"}}", role.as_wire())?,
+        Restore::Screen => writeln!(
+            w,
+            "{{\"role\":\"{}\",\"restore\":\"screen\"}}",
+            role.as_wire()
+        )?,
+    }
     w.flush()
 }
 
 /// Read the client's role request (holder side). A missing/unknown role is the
-/// safe read-only default.
-pub fn read_role_request<R: Read>(r: &mut R) -> io::Result<Role> {
-    Ok(json_role(&read_handshake_line(r)?))
+/// safe read-only default; a missing/unknown restore is the byte-exact raw-ring
+/// default.
+pub fn read_role_request<R: Read>(r: &mut R) -> io::Result<RoleRequest> {
+    let line = read_handshake_line(r)?;
+    Ok(RoleRequest {
+        role: json_role(&line),
+        restore: json_restore(&line),
+    })
 }
 
 /// Write the holder's handshake reply (holder → client): the role actually
@@ -429,25 +491,47 @@ mod tests {
 
     #[test]
     fn role_request_round_trips_and_defaults_to_reader() {
-        // Explicit writer request.
+        // Explicit writer request (raw restore — today's default).
         let mut buf = Vec::new();
-        write_role_request(&mut buf, Role::Writer).unwrap();
-        assert_eq!(
-            read_role_request(&mut Cursor::new(buf)).unwrap(),
-            Role::Writer
-        );
+        write_role_request(&mut buf, Role::Writer, Restore::Raw).unwrap();
+        let req = read_role_request(&mut Cursor::new(buf)).unwrap();
+        assert_eq!(req.role, Role::Writer);
+        assert_eq!(req.restore, Restore::Raw);
 
         // Explicit reader request.
         let mut buf = Vec::new();
-        write_role_request(&mut buf, Role::Reader).unwrap();
-        assert_eq!(
-            read_role_request(&mut Cursor::new(buf)).unwrap(),
-            Role::Reader
-        );
+        write_role_request(&mut buf, Role::Reader, Restore::Raw).unwrap();
+        let req = read_role_request(&mut Cursor::new(buf)).unwrap();
+        assert_eq!(req.role, Role::Reader);
+        assert_eq!(req.restore, Restore::Raw);
 
-        // A line with no role field is admitted as a reader (safe default).
+        // A line with no role field is admitted as a reader with raw restore
+        // (both safe defaults).
         let mut c = Cursor::new(b"{}\n".to_vec());
-        assert_eq!(read_role_request(&mut c).unwrap(), Role::Reader);
+        let req = read_role_request(&mut c).unwrap();
+        assert_eq!(req.role, Role::Reader);
+        assert_eq!(req.restore, Restore::Raw);
+    }
+
+    #[test]
+    fn restore_field_is_opt_in_and_back_compatible() {
+        // A screen-restore request carries the field and round-trips.
+        let mut buf = Vec::new();
+        write_role_request(&mut buf, Role::Reader, Restore::Screen).unwrap();
+        assert_eq!(buf, b"{\"role\":\"reader\",\"restore\":\"screen\"}\n");
+        let req = read_role_request(&mut Cursor::new(buf)).unwrap();
+        assert_eq!(req.restore, Restore::Screen);
+
+        // A raw request is byte-identical to the pre-M3 line (pm back-compat).
+        let mut buf = Vec::new();
+        write_role_request(&mut buf, Role::Writer, Restore::Raw).unwrap();
+        assert_eq!(buf, b"{\"role\":\"writer\"}\n");
+
+        // pm's exact pre-M3 line still parses as writer + raw replay.
+        let mut c = Cursor::new(b"{\"role\":\"writer\"}\n".to_vec());
+        let req = read_role_request(&mut c).unwrap();
+        assert_eq!(req.role, Role::Writer);
+        assert_eq!(req.restore, Restore::Raw);
     }
 
     #[test]

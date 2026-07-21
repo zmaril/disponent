@@ -591,13 +591,25 @@
           "nullable": true
         },
         {
-          "name": "attachTmuxSocket",
+          "name": "attachTransport",
+          "type": {
+            "enum": "AttachTransport"
+          },
+          "nullable": true
+        },
+        {
+          "name": "attachEndpoint",
           "type": "string",
           "nullable": true
         },
         {
-          "name": "attachTmuxSession",
+          "name": "attachTarget",
           "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "attachUrl",
+          "type": "url",
           "nullable": true
         },
         {

@@ -92,6 +92,13 @@ fn local_lifecycle_on_real_tmux() {
     assert_eq!(handle["tmux"], format!("dsp-{}", session.uid));
     assert!(running.url.is_none(), "no ttyd locally (yet)");
 
+    // The transport-neutral attach descriptor: a local tmux worker is reachable
+    // as (socket, dsp-<uid>) under the `tmux` transport, with no web fallback.
+    assert_eq!(running.attach_transport.as_deref(), Some("tmux"));
+    assert_eq!(running.attach_endpoint.as_deref(), Some(socket.as_str()));
+    assert_eq!(running.attach_target, Some(format!("dsp-{}", session.uid)));
+    assert!(running.attach_url.is_none());
+
     // the work dir materialized: brief written, runner ran the fake agent
     let work = root.join(&session.uid);
     assert!(work.join("brief.md").exists());
