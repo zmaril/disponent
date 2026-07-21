@@ -149,6 +149,14 @@
       },
       {
         "def": null,
+        "desc": "Per-dispatch agent command line; replaces the env default and runs\nverbatim (the brief is NOT appended). For teleport-style launches like\n`claude --teleport <id>` that carry no prompt.",
+        "name": "agent_cmd",
+        "notNull": false,
+        "pk": false,
+        "type": "text"
+      },
+      {
+        "def": null,
         "desc": null,
         "name": "template_name",
         "notNull": false,

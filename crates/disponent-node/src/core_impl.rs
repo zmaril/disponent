@@ -201,6 +201,7 @@ fn spec_in(spec: DispatchSpec) -> anyhow::Result<mcp::DispatchSpec> {
         git_ref: spec.git_ref,
         isolation: spec.isolation.map(|i| i.to_wire().to_string()),
         fetch_remote: spec.fetch_remote,
+        agent_cmd: spec.agent_cmd,
         template: spec.template,
         setup: spec.setup,
         timeout_secs: spec.timeout_secs,
