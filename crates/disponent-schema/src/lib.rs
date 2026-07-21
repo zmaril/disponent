@@ -391,6 +391,10 @@ pub struct Dispatch {
     /// Fetch gitRef from the workspace's origin and cut the worktree off it,
     /// rather than off local HEAD.
     pub fetch_remote: Option<bool>,
+    /// Per-dispatch agent command line; replaces the env default and runs
+    /// verbatim (the brief is NOT appended). For teleport-style launches like
+    /// `claude --teleport <id>` that carry no prompt.
+    pub agent_cmd: Option<String>,
     pub template_name: Option<Id<Template>>,
     /// Per-dispatch setup script — runs after the template's setup and the repo clone.
     pub setup: Option<String>,
@@ -554,6 +558,10 @@ pub struct DispatchSpec {
     /// Fetch gitRef from the workspace's origin and cut the worktree off it,
     /// rather than off local HEAD.
     pub fetch_remote: Option<bool>,
+    /// Per-dispatch agent command line; replaces the env default and runs
+    /// verbatim (the brief is NOT appended). For teleport-style launches like
+    /// `claude --teleport <id>` that carry no prompt.
+    pub agent_cmd: Option<String>,
     /// Named template to boot from.
     pub template: Option<String>,
     /// Per-dispatch setup script. No secrets — those live in the template.

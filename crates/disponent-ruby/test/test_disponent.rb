@@ -32,11 +32,11 @@ class TestDisponent < Minitest::Test
     assert(caps.any? { |c| c.env_slug == "exe-dev" && c.capability == "isolation_vm" })
     refute(caps.any? { |c| c.env_slug == "local" && c.capability == "isolation_vm" })
 
-    # dispatch flattens to positional optionals; tags is the 13th (after the 12
+    # dispatch flattens to positional optionals; tags is the 14th (after the 13
     # scalar optionals agent..unchecked), carried here so the fan-out send below
     # can address it.
     session = d.dispatch("say hi from ruby", "local",
-      nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, ["ruby-fanout"])
+      nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, ["ruby-fanout"])
     assert_equal "queued", session.state
 
     # Ruby omits the @manual wait(); poll session() until the dry-run
@@ -102,10 +102,10 @@ class TestDisponent < Minitest::Test
 
   def test_bad_inputs_fail_at_the_seam
     d = open
-    # labels is the 14th (last) optional param; pass the 13 preceding as nil.
+    # labels is the 15th (last) optional param; pass the 14 preceding as nil.
     err = assert_raises(RuntimeError) do
-      # 2 required (brief, env) + 13 nil optionals (agent..tags), then labels.
-      d.dispatch("x", "local", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "not json")
+      # 2 required (brief, env) + 14 nil optionals (agent..tags), then labels.
+      d.dispatch("x", "local", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "not json")
     end
     assert_includes err.message, "labels"
 

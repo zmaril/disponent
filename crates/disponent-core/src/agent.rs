@@ -36,17 +36,24 @@ pub struct LaunchSpec {
     /// The provider wrote the brief file during START and names where to read
     /// it — local `"$(cat ../brief.md)"`, exe.dev `"$(cat /tmp/disponent-brief.md)"`.
     /// Passing the *reference* (not the text) keeps a large brief off the
-    /// command string, exactly as before.
-    pub brief_ref: String,
+    /// command string, exactly as before. `None` = launch `agent_cmd` VERBATIM
+    /// with no brief appended — a per-dispatch `agent_cmd` override (teleport,
+    /// `claude --teleport <id>`) carries no prompt, so appending a brief token
+    /// would corrupt it.
+    pub brief_ref: Option<String>,
 }
 
 impl LaunchSpec {
     /// The composed agent command line: the agent binary + flags, with the
-    /// brief as its final argv. This is what the adapter spawns; each env's
-    /// `Compute::spawn` decides whether it lands as keystrokes in a local tmux
-    /// pane or as a bootstrap on a remote worker.
+    /// brief as its final argv when there is one. This is what the adapter
+    /// spawns; each env's `Compute::spawn` decides whether it lands as
+    /// keystrokes in a local tmux pane or as a bootstrap on a remote worker.
+    /// With no `brief_ref`, the `agent_cmd` runs verbatim.
     pub fn command(&self) -> String {
-        format!("{} {}", self.agent_cmd, self.brief_ref)
+        match &self.brief_ref {
+            Some(brief) => format!("{} {}", self.agent_cmd, brief),
+            None => self.agent_cmd.clone(),
+        }
     }
 }
 
