@@ -16,7 +16,7 @@ magnus = "0.8"
 disponent-core = { path = "../disponent-core" }
 # The shared streaming contract (`Poll`/`PollStream`) the generated surface imports;
 # pinned to the same fluessig SHA the codegen (scripts/gen.sh / CI) generates against.
-fluessig-runtime = { git = "https://github.com/zmaril/fluessig", rev = "d1a4eca8b1940967393646f09415f9f6ee760063" }
+fluessig-runtime = { git = "https://github.com/zmaril/fluessig", rev = "0856fe546cb0e5c547ea8cba0bb0ff281012b28c" }
 # the generated STREAMING surface releases the GVL around each blocking poll (not
 # tokio — Ruby's dressing is a plain blocking Enumerator). Track magnus 0.8's rb-sys.
 rb-sys = "0.9"

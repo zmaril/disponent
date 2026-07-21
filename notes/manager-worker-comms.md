@@ -555,17 +555,19 @@ Ordered smallest-first; the MVP is the minimum that delivers **both** flows.
   `EventPayload` variant; `tags: string[]` on `Dispatch`/`DispatchSpec`. Regen.
 - The `@worker` decorator + fluessig's `workerHint` lowering (design §13.2), and
   the one-line `tools_for` gate extension (§5), gating `send` and `ack`.
-  - **Shipped (implementation note):** the pinned fluessig has no `@worker`
-    decorator and no generic annotation passthrough, so adding `workerHint`
-    would be a cross-repo change (its tsp lib + JS emitter + Rust MCP
-    projection) plus a rev bump here. The MVP instead ships a **name-based
-    gate**: `tools_for` widens to `readOnlyHint || name ∈ {send, ack}`, and the
-    worker-role stdio server intercepts those two by name to self-scope them
-    (`send` recipient-forced to the Manager via `--bound-session`, `ack`
-    confined to the bound session's inbox). Same enforced, CI-checkable
-    invariant. **Escalation heuristic:** this is fine while the worker-writable
-    set is exactly `{send, ack}`; escalate to the declarative fluessig
-    `@worker` decorator only if that list grows beyond send/ack.
+  - **Shipped (declarative, as designed):** `send` and `ack` carry
+    `#[fluessig(worker)]` in `crates/disponent-schema`, which the fluessig
+    derive front end lowers to `api.json` `"worker": true` → the MCP
+    `workerHint` annotation (the sibling of `@readonly`→`readOnlyHint`). The
+    gate is `readOnlyHint || workerHint` — the worker-writable set is
+    schema-owned, not a hardcoded name list, and moves with the schema.
+    - *History:* an interim step shipped a pragmatic **name-based gate**
+      (`readOnlyHint || name ∈ {send, ack}`) while fluessig lacked a `worker`
+      op flag. fluessig#68 added `#[fluessig(worker)]`; this note now reflects
+      the declarative flag that replaced the name list. The worker-role stdio
+      server still intercepts the `workerHint` ops to self-scope them (`send`
+      recipient-forced to the Manager via `--bound-session`, `ack` confined to
+      the bound session's inbox).
 - Generalize `send` to `send(to?, body, inReplyTo?, topic?): Message[]` with
   tag/uid/user addressing, per-send `fanoutId` minting, and worker recipient
   defaulting; add `ack`.
