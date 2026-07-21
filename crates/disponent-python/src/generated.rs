@@ -331,6 +331,7 @@ pub struct DispatchSpec {
     pub git_ref: Option<String>,
     pub isolation: Option<IsolationKind>,
     pub fetch_remote: Option<bool>,
+    pub agent_cmd: Option<String>,
     pub template: Option<String>,
     pub setup: Option<String>,
     pub timeout_secs: Option<i32>,
@@ -342,7 +343,7 @@ pub struct DispatchSpec {
 #[pymethods]
 impl DispatchSpec {
     #[new]
-    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, fetch_remote=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
+    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, fetch_remote=None, agent_cmd=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
     fn new(
         brief: String,
         env: String,
@@ -353,6 +354,7 @@ impl DispatchSpec {
         git_ref: Option<String>,
         isolation: Option<IsolationKind>,
         fetch_remote: Option<bool>,
+        agent_cmd: Option<String>,
         template: Option<String>,
         setup: Option<String>,
         timeout_secs: Option<i32>,
@@ -371,6 +373,7 @@ impl DispatchSpec {
             git_ref,
             isolation,
             fetch_remote,
+            agent_cmd,
             template,
             setup,
             timeout_secs,
@@ -1023,7 +1026,7 @@ impl Disponent {
         let core = self.core.clone();
         py.detach(move || core.capabilities()).map_err(err)
     }
-    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, fetch_remote=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
+    #[pyo3(signature = (brief, env, agent=None, model=None, title=None, repo=None, git_ref=None, isolation=None, fetch_remote=None, agent_cmd=None, template=None, setup=None, timeout_secs=None, max_budget=None, unchecked=None, tags=None, labels=None))]
     fn dispatch(
         &self,
         py: Python<'_>,
@@ -1036,6 +1039,7 @@ impl Disponent {
         git_ref: Option<String>,
         isolation: Option<IsolationKind>,
         fetch_remote: Option<bool>,
+        agent_cmd: Option<String>,
         template: Option<String>,
         setup: Option<String>,
         timeout_secs: Option<i32>,
@@ -1054,6 +1058,7 @@ impl Disponent {
             git_ref,
             isolation,
             fetch_remote,
+            agent_cmd,
             template,
             setup,
             timeout_secs,

@@ -732,6 +732,15 @@
           "doc": "Fetch gitRef from the workspace's origin and cut the worktree off it,\nrather than off local HEAD."
         },
         {
+          "name": "agent_cmd",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Per-dispatch agent command line; replaces the env default and runs\nverbatim (the brief is NOT appended). For teleport-style launches like\n`claude --teleport <id>` that carry no prompt."
+        },
+        {
           "name": "template_name",
           "type": {
             "k": "ref",
@@ -1694,6 +1703,15 @@
           },
           "nullable": true,
           "doc": "Fetch gitRef from the workspace's origin and cut the worktree off it,\nrather than off local HEAD."
+        },
+        {
+          "name": "agent_cmd",
+          "type": {
+            "k": "scalar",
+            "name": "string"
+          },
+          "nullable": true,
+          "doc": "Per-dispatch agent command line; replaces the env default and runs\nverbatim (the brief is NOT appended). For teleport-style launches like\n`claude --teleport <id>` that carry no prompt."
         },
         {
           "name": "template",
