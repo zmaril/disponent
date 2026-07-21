@@ -151,20 +151,22 @@ pub fn resize_master(fd: RawFd, cols: u16, rows: u16) -> io::Result<()> {
 fn open_pty(size: WinSize) -> io::Result<(OwnedFd, OwnedFd)> {
     let mut master: RawFd = -1;
     let mut slave: RawFd = -1;
-    let ws = libc::winsize {
+    let mut ws = libc::winsize {
         ws_row: size.rows,
         ws_col: size.cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    // SAFETY: out-params are valid locals; termios null = defaults; &ws valid.
+    // SAFETY: out-params are valid locals; termios null = defaults; &mut ws
+    // valid. The winsize/termios params are `*mut` on Apple's libc but `*const`
+    // on Linux's; passing `*mut` (which coerces to `*const`) satisfies both.
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &ws,
+            std::ptr::null_mut(),
+            &mut ws,
         )
     };
     if rc == -1 {

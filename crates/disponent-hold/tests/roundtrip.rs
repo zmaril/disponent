@@ -13,18 +13,15 @@ use disponent_hold::{Client, Config, Exit, Holder, Restore, Role};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// A unique scratch socket dir per test (isolated, never a real path).
+/// A unique scratch socket dir per test (isolated, never a real path). Kept
+/// short: the socket path underneath is `<dir>/<uid>.sock`, and macOS caps a
+/// unix socket path at `SUN_LEN` (104) — well under Linux's 108. pid keeps it
+/// distinct across test binaries, the atomic counter across calls within one,
+/// so no timestamp is needed (which would blow the budget on macOS's long
+/// `/var/folders/...` TMPDIR).
 fn scratch_dir() -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "dsp-hold-test-{}-{}-{}",
-        std::process::id(),
-        n,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = std::env::temp_dir().join(format!("dsp-hold-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
