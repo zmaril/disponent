@@ -172,9 +172,13 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_handle: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_tmux_socket: Option<String>,
+    pub attach_transport: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_tmux_session: Option<String>,
+    pub attach_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

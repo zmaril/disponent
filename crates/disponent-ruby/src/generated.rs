@@ -496,6 +496,49 @@ impl McpRole {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum AttachTransport {
+    Tmux,
+    DspHold,
+    Ttyd,
+}
+impl AttachTransport {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "tmux" => Ok(Self::Tmux),
+            "dsp_hold" => Ok(Self::DspHold),
+            "ttyd" => Ok(Self::Ttyd),
+            other => Err(anyhow::anyhow!(
+                "unknown AttachTransport: {other} (expected tmux | dsp_hold | ttyd)"
+            )),
+        }
+    }
+}
+impl AttachTransport {
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Self::Tmux => "tmux",
+            Self::DspHold => "dsp_hold",
+            Self::Ttyd => "ttyd",
+        }
+    }
+}
+/// A getter returning this enum hands Ruby its wire string.
+impl magnus::IntoValue for AttachTransport {
+    fn into_value_with(self, ruby: &magnus::Ruby) -> magnus::Value {
+        ruby.str_new(self.wire()).as_value()
+    }
+}
+impl magnus::TryConvert for AttachTransport {
+    fn try_convert(val: magnus::Value) -> Result<Self, magnus::Error> {
+        Self::parse(&<String as magnus::TryConvert>::try_convert(val)?).map_err(rberr)
+    }
+}
+// SAFETY: the enum owns its data (a Copy discriminant) — no borrow from
+// the Ruby value survives, so it is sound in owning positions like
+// `Vec<Self>` (an enum-list input param).
+unsafe impl magnus::try_convert::TryConvertOwned for AttachTransport {}
+
 #[derive(Clone)]
 pub struct StateChange {
     pub from: SessionState,
@@ -774,8 +817,10 @@ pub struct Session {
     pub dispatch_id: String,
     pub state: SessionState,
     pub env_handle: Option<String>,
-    pub attach_tmux_socket: Option<String>,
-    pub attach_tmux_session: Option<String>,
+    pub attach_transport: Option<AttachTransport>,
+    pub attach_endpoint: Option<String>,
+    pub attach_target: Option<String>,
+    pub attach_url: Option<String>,
     pub url: Option<String>,
     pub resumed_from: Option<String>,
     pub started_at: Option<String>,
@@ -797,11 +842,17 @@ impl Session {
     fn get_env_handle(&self) -> Option<String> {
         self.env_handle.clone()
     }
-    fn get_attach_tmux_socket(&self) -> Option<String> {
-        self.attach_tmux_socket.clone()
+    fn get_attach_transport(&self) -> Option<AttachTransport> {
+        self.attach_transport.clone()
     }
-    fn get_attach_tmux_session(&self) -> Option<String> {
-        self.attach_tmux_session.clone()
+    fn get_attach_endpoint(&self) -> Option<String> {
+        self.attach_endpoint.clone()
+    }
+    fn get_attach_target(&self) -> Option<String> {
+        self.attach_target.clone()
+    }
+    fn get_attach_url(&self) -> Option<String> {
+        self.attach_url.clone()
     }
     fn get_url(&self) -> Option<String> {
         self.url.clone()
@@ -1467,13 +1518,12 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     c.define_method("state", method!(Session::get_state, 0))?;
     c.define_method("env_handle", method!(Session::get_env_handle, 0))?;
     c.define_method(
-        "attach_tmux_socket",
-        method!(Session::get_attach_tmux_socket, 0),
+        "attach_transport",
+        method!(Session::get_attach_transport, 0),
     )?;
-    c.define_method(
-        "attach_tmux_session",
-        method!(Session::get_attach_tmux_session, 0),
-    )?;
+    c.define_method("attach_endpoint", method!(Session::get_attach_endpoint, 0))?;
+    c.define_method("attach_target", method!(Session::get_attach_target, 0))?;
+    c.define_method("attach_url", method!(Session::get_attach_url, 0))?;
     c.define_method("url", method!(Session::get_url, 0))?;
     c.define_method("resumed_from", method!(Session::get_resumed_from, 0))?;
     c.define_method("started_at", method!(Session::get_started_at, 0))?;

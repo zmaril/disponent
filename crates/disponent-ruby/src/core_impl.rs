@@ -76,6 +76,9 @@ wire_enum!(CapabilityKind {
     IsolationContainer => "isolation_container", IsolationVm => "isolation_vm",
     Templates => "templates", ArtifactFetch => "artifact_fetch", UsageReport => "usage_report",
 });
+wire_enum!(AttachTransport {
+    Tmux => "tmux", DspHold => "dsp_hold", Ttyd => "ttyd",
+});
 
 // ── engine DTO → binding DTO ──
 
@@ -85,8 +88,14 @@ fn session_out(s: mcp::Session) -> anyhow::Result<Session> {
         dispatch_id: s.dispatch_id,
         state: SessionState::from_wire(&s.state)?,
         env_handle: s.env_handle.map(|v| v.to_string()),
-        attach_tmux_socket: s.attach_tmux_socket,
-        attach_tmux_session: s.attach_tmux_session,
+        attach_transport: s
+            .attach_transport
+            .as_deref()
+            .map(AttachTransport::from_wire)
+            .transpose()?,
+        attach_endpoint: s.attach_endpoint,
+        attach_target: s.attach_target,
+        attach_url: s.attach_url,
         url: s.url,
         resumed_from: s.resumed_from,
         started_at: s.started_at,

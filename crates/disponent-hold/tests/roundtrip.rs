@@ -1,6 +1,7 @@
-//! Integration tests for the M0 holder: drive it through its library API
-//! (fast, no spawned `disponent` process) and assert byte-exact round-trip,
-//! scrollback replay, multi-reader fan-out, and resize.
+//! Integration tests for the holder: drive it through its library API (fast, no
+//! spawned `disponent` process) and assert byte-exact round-trip, scrollback
+//! replay, multi-reader fan-out, resize, the M2a writer lock, and the M3
+//! opt-in vt100 screen-restore repaint (vs. the unchanged raw-ring replay).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use disponent_hold::protocol::ServerFrame;
-use disponent_hold::{Client, Config, Exit, Holder, Role};
+use disponent_hold::{Client, Config, Exit, Holder, Restore, Role};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -528,5 +529,130 @@ fn large_final_output_fully_precedes_exit() {
         "the trailing marker must arrive before Exit"
     );
     assert_eq!(exit, Some(Exit::Code(5)), "exit code must still propagate");
+    drop(holder);
+}
+
+// ---------------------------------------------------------------------------
+// M3: human screen restore via shpool_vt100 (design §6/§7). An opt-in
+// `restore:"screen"` attach gets a clean `contents_formatted()` repaint instead
+// of the raw byte ring; the default (and the engine's `exact` observer) still
+// gets the byte-exact raw ring, and the vt100 screen tracks the pty geometry.
+// ---------------------------------------------------------------------------
+
+/// Drain a client's initial restore buffer: read `Data` frames until a short
+/// read timeout (the holder sends the whole restore buffer at once on attach,
+/// then the child lingers), accumulating the bytes. Stops on timeout/EOF/Exit.
+fn drain_initial(c: &mut Client, ms: u64) -> Vec<u8> {
+    c.set_read_timeout(Some(Duration::from_millis(ms))).unwrap();
+    let mut acc = Vec::new();
+    loop {
+        match c.read_frame() {
+            Ok(Some(ServerFrame::Data(d))) => acc.extend_from_slice(&d),
+            Ok(Some(ServerFrame::Heartbeat)) => {}
+            Ok(Some(ServerFrame::Exit(_))) | Ok(None) => break,
+            Err(_) => break, // timeout — the restore buffer is fully drained
+        }
+    }
+    acc
+}
+
+#[test]
+fn screen_restore_repaints_while_raw_replays_the_exact_ring() {
+    let dir = scratch_dir();
+    // A full-screen sequence with NO newlines (so ONLCR can't rewrite it): red
+    // "hello" on row 1, then jump to row 2 col 5 and print "world". The child
+    // itself never emits a clear-screen or a bare cursor-home — those only
+    // appear in a vt100 repaint, which is what distinguishes the two tiers.
+    let holder = Holder::start(sh(
+        "restore",
+        "printf '\\033[31mhello\\033[0m\\033[2;5Hworld'; sleep 3",
+        &dir,
+    ))
+    .unwrap();
+
+    // Let the reader thread drain the child's output into BOTH the raw ring and
+    // the vt100 screen before we attach.
+    std::thread::sleep(Duration::from_millis(400));
+
+    // A default (raw) reader — this is exactly the engine observer's path — gets
+    // the byte-exact ring: the child's escapes verbatim, nothing added. This is
+    // the regression guard: the raw tier must be unchanged.
+    let mut raw = Client::connect_uid(Some(&dir), "restore").unwrap();
+    let raw_buf = drain_initial(&mut raw, 500);
+    assert_eq!(
+        raw_buf, b"\x1b[31mhello\x1b[0m\x1b[2;5Hworld",
+        "the raw ring must replay the child's exact bytes, unchanged"
+    );
+
+    // A `restore:"screen"` reader gets a vt100 repaint instead: it is prefixed
+    // with show-cursor + SGR-reset + cursor-home + clear (`\x1b[?25h\x1b[m\x1b[H\x1b[J`)
+    // — bytes the child never wrote — and reproduces the final screen content.
+    let mut scr =
+        Client::connect_uid_restore(Some(&dir), "restore", Role::Reader, Restore::Screen).unwrap();
+    let scr_buf = drain_initial(&mut scr, 500);
+    assert!(
+        scr_buf.starts_with(b"\x1b[?25h\x1b[m\x1b[H\x1b[J"),
+        "the repaint must start with the contents_formatted reset prefix, got {:?}",
+        String::from_utf8_lossy(&scr_buf)
+    );
+    assert!(
+        contains(&scr_buf, b"\x1b[J") && contains(&scr_buf, b"\x1b[H"),
+        "the repaint must carry the clear + cursor-home the raw stream lacks"
+    );
+    assert!(
+        contains(&scr_buf, b"hello") && contains(&scr_buf, b"world"),
+        "the repaint must reproduce the final screen content, got {:?}",
+        String::from_utf8_lossy(&scr_buf)
+    );
+    // And the repaint is emphatically NOT the raw ring.
+    assert_ne!(
+        scr_buf, raw_buf,
+        "a screen-restore attach must not receive the raw ring"
+    );
+    assert!(
+        !contains(&raw_buf, b"\x1b[J"),
+        "the raw ring must not contain the repaint's clear-screen"
+    );
+    drop(holder);
+}
+
+#[test]
+fn screen_restore_reflects_a_resize_of_the_vt100_screen() {
+    let dir = scratch_dir();
+    // Write "BOTTOM" at row 20 of the default 24-row screen, then linger.
+    let holder =
+        Holder::start(sh("restoresz", "printf '\\033[20;1HBOTTOM'; sleep 3", &dir)).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Before any resize, the 24-row screen holds "BOTTOM" on row 20.
+    let mut before =
+        Client::connect_uid_restore(Some(&dir), "restoresz", Role::Reader, Restore::Screen)
+            .unwrap();
+    let before_buf = drain_initial(&mut before, 500);
+    assert!(
+        contains(&before_buf, b"BOTTOM"),
+        "row-20 content must be present on the 24-row screen, got {:?}",
+        String::from_utf8_lossy(&before_buf)
+    );
+
+    // A writer shrinks the pty to 10 rows. The holder resizes the vt100 screen
+    // in lockstep, so row 20 falls off the now-10-row grid.
+    let mut w = Client::connect_uid_as(Some(&dir), "restoresz", Role::Writer).unwrap();
+    assert_eq!(w.granted_role(), Role::Writer);
+    w.send_resize(90, 10).unwrap();
+    // Give the holder a beat to apply the resize to the screen.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // A fresh screen-restore attach now repaints a 10-row screen — "BOTTOM"
+    // (row 20) is gone, proving the resize updated the vt100 dimensions.
+    let mut after =
+        Client::connect_uid_restore(Some(&dir), "restoresz", Role::Reader, Restore::Screen)
+            .unwrap();
+    let after_buf = drain_initial(&mut after, 500);
+    assert!(
+        !contains(&after_buf, b"BOTTOM"),
+        "after shrinking to 10 rows the row-20 content must be gone, got {:?}",
+        String::from_utf8_lossy(&after_buf)
+    );
     drop(holder);
 }

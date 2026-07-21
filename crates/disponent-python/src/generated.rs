@@ -132,6 +132,14 @@ pub enum McpRole {
     Worker,
 }
 
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Copy, PartialEq)]
+pub enum AttachTransport {
+    Tmux,
+    DspHold,
+    Ttyd,
+}
+
 #[pyclass(get_all)]
 #[derive(Clone)]
 pub struct StateChange {
@@ -657,8 +665,10 @@ pub struct Session {
     pub dispatch_id: String,
     pub state: SessionState,
     pub env_handle: Option<String>,
-    pub attach_tmux_socket: Option<String>,
-    pub attach_tmux_session: Option<String>,
+    pub attach_transport: Option<AttachTransport>,
+    pub attach_endpoint: Option<String>,
+    pub attach_target: Option<String>,
+    pub attach_url: Option<String>,
     pub url: Option<String>,
     pub resumed_from: Option<String>,
     pub started_at: Option<String>,
@@ -670,14 +680,16 @@ pub struct Session {
 #[pymethods]
 impl Session {
     #[new]
-    #[pyo3(signature = (uid, dispatch_id, state, env_handle=None, attach_tmux_socket=None, attach_tmux_session=None, url=None, resumed_from=None, started_at=None, ended_at=None, exit_reason=None, exit_detail=None, reaped_at=None))]
+    #[pyo3(signature = (uid, dispatch_id, state, env_handle=None, attach_transport=None, attach_endpoint=None, attach_target=None, attach_url=None, url=None, resumed_from=None, started_at=None, ended_at=None, exit_reason=None, exit_detail=None, reaped_at=None))]
     fn new(
         uid: String,
         dispatch_id: String,
         state: SessionState,
         env_handle: Option<String>,
-        attach_tmux_socket: Option<String>,
-        attach_tmux_session: Option<String>,
+        attach_transport: Option<AttachTransport>,
+        attach_endpoint: Option<String>,
+        attach_target: Option<String>,
+        attach_url: Option<String>,
         url: Option<String>,
         resumed_from: Option<String>,
         started_at: Option<String>,
@@ -691,8 +703,10 @@ impl Session {
             dispatch_id,
             state,
             env_handle,
-            attach_tmux_socket,
-            attach_tmux_session,
+            attach_transport,
+            attach_endpoint,
+            attach_target,
+            attach_url,
             url,
             resumed_from,
             started_at,
@@ -1221,6 +1235,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Fidelity>()?;
     m.add_class::<ArtifactKind>()?;
     m.add_class::<McpRole>()?;
+    m.add_class::<AttachTransport>()?;
     m.add_class::<StateChange>()?;
     m.add_class::<AgentMessage>()?;
     m.add_class::<ToolCallInfo>()?;
