@@ -11,21 +11,38 @@ name: auto-update-pr-branches
 # true rebase would rewrite the PR's history and fight force-push protections, so
 # button-equivalent update is the right default here.
 #
-# Storm control: N open PRs each get updated on every merge, and each update
-# kicks that PR's CI. Two things keep this bounded:
+# CI on the updated branch -- READ THIS. GitHub deliberately does NOT trigger
+# workflows for pushes made with the built-in GITHUB_TOKEN. So if the update push
+# carries GITHUB_TOKEN, the branch advances but the PR's required checks never
+# re-run: the PR sits at mergeable_state "blocked" with zero check runs -- exactly
+# the state strict up-to-date was meant to clear. For CI to trigger, the update
+# push must carry a NON-GITHUB_TOKEN identity. This workflow uses one when
+# configured, in priority order:
+#   1. A GitHub App installation token, minted in-workflow by
+#      create-github-app-token when an App is configured. Set the App id as the
+#      AUTOUPDATE_APP_ID repo/org VARIABLE (App ids are not secret) and the App's
+#      private key as the AUTOUPDATE_APP_PRIVATE_KEY SECRET. The App needs
+#      contents + pull-requests write on the repo.
+#   2. A fine-grained PAT with contents + pull-requests write, as the
+#      AUTOUPDATE_TOKEN SECRET.
+#   3. The built-in github.token, as an honest fallback -- the branch still
+#      updates, but per the above the update does NOT re-run required checks. The
+#      job summary says so loudly whenever it falls back and actually updated a
+#      branch, and a PR already updated this way needs a one-time nudge to re-run
+#      (for a Dependabot PR, an `@dependabot recreate` comment).
+#
+# Storm control: N open PRs each get updated on every merge. Two things keep this
+# bounded:
 #   1. This workflow triggers only on pushes to the default branch. Updating a PR
-#      branch is not a push to the default branch, so it never re-triggers
-#      itself; the only fan-out is one CI run per updated PR.
+#      branch is not a push to the default branch, so it never re-triggers itself.
 #   2. The selectors below (edit to taste) keep it to PRs that are actually
 #      ready, and the concurrency group coalesces a burst of merges into a single
 #      pass against the newest default branch.
 # For a very busy repo, GitHub's native merge queue is the heavier-duty
 # alternative and subsumes this workflow entirely.
 #
-# Token: the update-branch API needs contents:write and pull-requests:write. The
-# built-in GITHUB_TOKEN has both for same-repo branches (the fleet case), so no
-# PAT is required. It cannot push to a fork's branch, so PRs from forks are
-# skipped and reported rather than failed.
+# Fork note: the update-branch push cannot reach a fork's branch (no token has
+# write there), so PRs from forks are skipped and reported rather than failed.
 
 on:
   push:
@@ -50,12 +67,28 @@ jobs:
       UPDATE_AUTO_MERGE: "true"  # PRs with auto-merge enabled (even drafts)
       UPDATE_LABEL: ""           # PRs carrying this label; empty disables it
     steps:
+      # Mint a GitHub App installation token when an App is configured, so the
+      # update push carries a non-GITHUB_TOKEN identity and CI actually re-runs.
+      # Skipped (token output empty) when the AUTOUPDATE_APP_ID variable is unset,
+      # in which case the github-script step falls back to the PAT or github.token.
+      - name: Mint app token
+        id: app_token
+        if: ${{ vars.AUTOUPDATE_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.AUTOUPDATE_APP_ID }}
+          private-key: ${{ secrets.AUTOUPDATE_APP_PRIVATE_KEY }}
       - uses: actions/github-script@v7
         with:
+          # Token priority: App token > fine-grained PAT > built-in github.token.
+          github-token: ${{ steps.app_token.outputs.token || secrets.AUTOUPDATE_TOKEN || github.token }}
           script: |
             const nonDraft = process.env.UPDATE_NON_DRAFT === "true";
             const autoMerge = process.env.UPDATE_AUTO_MERGE === "true";
             const label = (process.env.UPDATE_LABEL || "").trim();
+            // True only when an elevated identity (App or PAT) backs the token
+            // above; a GITHUB_TOKEN update push does not re-run required checks.
+            const elevated = process.env.ELEVATED === "true";
             const { owner, repo } = context.repo;
             const slug = `${owner}/${repo}`;
             const base = context.payload.repository.default_branch;
@@ -111,7 +144,27 @@ jobs:
               }
             }
 
+            // Honest capability edge: when the update push went out under the
+            // built-in GITHUB_TOKEN (not elevated) and actually advanced a branch,
+            // warn loudly that those branches will NOT re-run required checks.
+            const warning = (!elevated && updated.length)
+              ? [
+                  "> [!WARNING]",
+                  "> Updated under the built-in GITHUB_TOKEN: the updated branch(es) will",
+                  "> NOT re-run required checks. GitHub suppresses workflow triggers on a",
+                  "> GITHUB_TOKEN push, so each updated PR stays blocked with zero new",
+                  "> check runs. Configure an elevated token so CI triggers on updated",
+                  "> branches -- a GitHub App (AUTOUPDATE_APP_ID variable +",
+                  "> AUTOUPDATE_APP_PRIVATE_KEY secret) or a fine-grained PAT",
+                  "> (AUTOUPDATE_TOKEN secret) with contents + pull-requests write. A PR",
+                  "> already updated this way needs a one-time re-run (for a Dependabot",
+                  "> PR, an `@dependabot recreate` comment).",
+                  "",
+                ]
+              : [];
+
             const lines = [
+              ...warning,
               "## Auto-update PR branches",
               "",
               `Base \`${base}\`, ${prs.length} open PR(s) scanned`,
@@ -128,3 +181,7 @@ jobs:
             await core.summary.addRaw(lines.join("\n")).write();
 
             if (failed.length) core.setFailed(`${failed.length} PR(s) failed to update`);
+        env:
+          # True when an elevated identity (App or PAT) backs the token above, so
+          # the script can warn honestly when it fell back to the built-in token.
+          ELEVATED: ${{ (vars.AUTOUPDATE_APP_ID != '' || secrets.AUTOUPDATE_TOKEN != '') && 'true' || 'false' }}
