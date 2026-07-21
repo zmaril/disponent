@@ -197,6 +197,17 @@ pub enum McpRole {
     Worker,
 }
 
+#[napi(string_enum)]
+#[derive(Clone, Copy)]
+pub enum AttachTransport {
+    #[napi(value = "tmux")]
+    Tmux,
+    #[napi(value = "dsp_hold")]
+    DspHold,
+    #[napi(value = "ttyd")]
+    Ttyd,
+}
+
 #[napi(object)]
 #[derive(Clone)]
 pub struct StateChange {
@@ -414,8 +425,10 @@ pub struct Session {
     pub dispatch_id: String,
     pub state: SessionState,
     pub env_handle: Option<String>,
-    pub attach_tmux_socket: Option<String>,
-    pub attach_tmux_session: Option<String>,
+    pub attach_transport: Option<AttachTransport>,
+    pub attach_endpoint: Option<String>,
+    pub attach_target: Option<String>,
+    pub attach_url: Option<String>,
     pub url: Option<String>,
     pub resumed_from: Option<String>,
     pub started_at: Option<String>,
